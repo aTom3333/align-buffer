@@ -178,6 +178,10 @@ extensions."
 
 ;;; Reading the plan
 
+(defun align-buffer-side ()
+  "Return which pane the current buffer is, `left' or `right', or nil."
+  align-buffer--side)
+
 (defun align-buffer-rows (session)
   "Return SESSION's rows."
   (align-buffer-plan-rows (align-buffer-session-plan session)))
