@@ -58,8 +58,9 @@ KIND is `blank', `line' or `text', and it decides which of the rest apply:
   text   TEXT, a string with no newline, standing for no line of any buffer.
 
 NUMBER is an integer to show in the gutter, defaulting to LINE.  FACE is a face
-or a list of faces, covering the whole row.  REFINEMENT is a list of (BEG . END)
-character offsets into the row's text.
+or a list of faces, covering the whole row.  REFINEMENT is a list of
+(BEG END FACE), character offsets into the row's text and the face to cover them
+with, for a generator that knows which characters within the line differ.
 
 The slots a KIND does not use are nil, and no consumer may read them: a `blank'
 cell has no SOURCE, and a `text' cell's LINE means nothing.  Emacs Lisp has no
@@ -95,7 +96,11 @@ through the plan instead, since no tagging of single rows can express those."
 ROWS is a vector or a list of `align-buffer-row'.  LEFT-NAME and RIGHT-NAME are
 strings.  LEFT-PARAMETERS and RIGHT-PARAMETERS are plists as built by
 `align-buffer-parameters-from-buffer'.  SECTIONS is a vector or list of
-\(FIRST-ROW . LAST-ROW) pairs, and PROPERTIES a plist.
+\(FIRST-ROW . LAST-ROW) pairs.
+
+PROPERTIES is a plist the generator keeps its own state in.  One key is read
+from it: `:owned-buffers', a list of buffers to kill when the session is torn
+down, for a generator that made a buffer to read from.
 
 SECTIONS may overlap and nest: a moved block and the hunks inside it are all
 sections.  Supplying it replaces what the rows' tags would have said."

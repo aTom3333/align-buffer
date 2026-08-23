@@ -533,6 +533,26 @@ news and its overlay left alone until then."
     (should-not (get-buffer " *doomed right*"))
     (should (= (length (buffer-list)) before))))
 
+(ert-deftest align-buffer-test-a-plan-can-own-buffers ()
+  "Buffers the plan names as its own are killed with the session.
+A generator that made a buffer to read from - a revision, a scratch source -
+says so on the plan rather than tearing it down itself."
+  (align-buffer-tests--with-plan plan
+    (let ((owned (generate-new-buffer " *owned source*")))
+      (setf (align-buffer-plan-properties plan) (list :owned-buffers (list owned)))
+      (align-buffer-quit (align-buffer-show plan))
+      (should-not (buffer-live-p owned)))))
+
+(ert-deftest align-buffer-test-an-owned-buffer-with-edits-survives ()
+  "A buffer the reader has edited is theirs, whoever named it."
+  (align-buffer-tests--with-plan plan
+    (let ((owned (generate-new-buffer " *owned and edited*")))
+      (with-current-buffer owned (insert "the reader typed this"))
+      (setf (align-buffer-plan-properties plan) (list :owned-buffers (list owned)))
+      (align-buffer-quit (align-buffer-show plan))
+      (should (buffer-live-p owned))
+      (kill-buffer owned))))
+
 (ert-deftest align-buffer-test-quit-forgets-the-placement-record ()
   "Teardown clears the record we kept on the windows.
 Left behind, the next session laid out in that window reads it as its own and
@@ -560,6 +580,73 @@ skips the reader's first move there."
               (align-buffer-forget-pending-place two)
               (should-not align-buffer--pending-place))
           (align-buffer-quit two))))))
+
+(ert-deftest align-buffer-test-refinement-covers-the-ranges-it-names ()
+  "A cell's refinement paints its ranges, over the row's own face.
+The ranges are character offsets into the row's text, which is what a generator
+that knows the intra-line difference can supply."
+  (let* ((source (align-buffer-tests--source " *refined*" "int foo(int bar);
+"))
+         (plan (align-buffer-plan-create
+                :left-name " *refined left*"
+                :right-name " *refined right*"
+                :rows (vector
+                       (align-buffer-row-create
+                        :left (align-buffer-cell-create
+                               :kind 'line :source source :line 1 :face 'shadow
+                               :refinement '((4 7 success) (12 15 warning)))
+                        :right (align-buffer-tests--blank-cell))))))
+    (unwind-protect
+        (let ((session (align-buffer-show plan)))
+          (unwind-protect
+              (with-current-buffer (align-buffer-buffer session 'left)
+                (let ((refinements
+                       (sort (seq-filter
+                              (lambda (overlay)
+                                (overlay-get overlay 'align-buffer-refinement))
+                              (overlays-in (point-min) (point-max)))
+                             (lambda (one other)
+                               (< (overlay-start one) (overlay-start other))))))
+                  (should (equal (mapcar (lambda (overlay)
+                                           (list (buffer-substring-no-properties
+                                                  (overlay-start overlay)
+                                                  (overlay-end overlay))
+                                                 (overlay-get overlay 'face)))
+                                         refinements)
+                                 '(("foo" success) ("bar" warning))))
+                  ;; Above the row face, or the row's colour would hide them.
+                  (should (cl-every (lambda (overlay)
+                                      (> (or (overlay-get overlay 'priority) 0) 0))
+                                    refinements))))
+            (align-buffer-quit session)))
+      (kill-buffer source))))
+
+(ert-deftest align-buffer-test-refinement-stops-at-the-row-end ()
+  "A range reaching past the line stops at it rather than covering the newline."
+  (let* ((source (align-buffer-tests--source " *short*" "ab
+"))
+         (plan (align-buffer-plan-create
+                :left-name " *short left*"
+                :right-name " *short right*"
+                :rows (vector
+                       (align-buffer-row-create
+                        :left (align-buffer-cell-create
+                               :kind 'line :source source :line 1
+                               :refinement '((0 40 success)))
+                        :right (align-buffer-tests--blank-cell))))))
+    (unwind-protect
+        (let ((session (align-buffer-show plan)))
+          (unwind-protect
+              (with-current-buffer (align-buffer-buffer session 'left)
+                (let ((overlay (car (seq-filter
+                                     (lambda (overlay)
+                                       (overlay-get overlay 'align-buffer-refinement))
+                                     (overlays-in (point-min) (point-max))))))
+                  (should (equal (buffer-substring-no-properties
+                                  (overlay-start overlay) (overlay-end overlay))
+                                 "ab"))))
+            (align-buffer-quit session)))
+      (kill-buffer source))))
 
 (ert-deftest align-buffer-test-gutter-width ()
   "The gutter is as wide as its largest number, and absent without numbers."

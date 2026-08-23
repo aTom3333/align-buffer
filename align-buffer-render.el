@@ -177,6 +177,17 @@ A nil NUMBER gives a faced strip with no digits."
     (overlay-put overlay 'align-buffer-row t)
     (overlay-put overlay 'face face)))
 
+(defun align-buffer--put-refinement (cell beginning)
+  "Cover CELL's refinement ranges, counted from BEGINNING."
+  (let ((limit (save-excursion (goto-char beginning) (line-end-position))))
+    (pcase-dolist (`(,start ,end ,face) (align-buffer-cell-refinement cell))
+      (let ((overlay (make-overlay (min (+ beginning start) limit)
+                                   (min (+ beginning end) limit))))
+        (overlay-put overlay 'align-buffer-refinement t)
+        (overlay-put overlay 'face face)
+        ;; Above the row's own face, which covers the same characters.
+        (overlay-put overlay 'priority 1)))))
+
 
 ;;; Building a pane
 
@@ -196,7 +207,8 @@ Return (POSITIONS . GUTTER-WIDTH), the row positions and the gutter's width."
         (align-buffer-pane-mode)
         (save-restriction
           (widen)
-          (dolist (tag '(align-buffer-gutter align-buffer-row))
+          (dolist (tag '(align-buffer-gutter align-buffer-row
+                                            align-buffer-refinement))
             (remove-overlays (point-min) (point-max) tag t)))
         (erase-buffer)
         (align-buffer--apply-parameters (align-buffer-parameters plan side))
@@ -212,6 +224,8 @@ Return (POSITIONS . GUTTER-WIDTH), the row positions and the gutter's width."
                  (number (align-buffer-cell-gutter-number cell)))
             (when-let ((face (align-buffer-cell-face cell)))
               (align-buffer--put-row-face face beginning end))
+            (when (align-buffer-cell-refinement cell)
+              (align-buffer--put-refinement cell beginning))
             (when (> width 0)
               (align-buffer--put-gutter beginning number width))))
         (set-buffer-modified-p nil)

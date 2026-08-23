@@ -163,7 +163,17 @@ The same buffers and the same windows; only the rows change."
         (dolist (side '(left right))
           (let ((buffer (align-buffer-buffer session side)))
             (when (and (buffer-live-p buffer) (not (eq buffer align-buffer--killing)))
-              (kill-buffer buffer))))))))
+              (kill-buffer buffer))))
+        (align-buffer--kill-owned session)))))
+
+(defun align-buffer--kill-owned (session)
+  "Kill the buffers SESSION's plan named as its own.
+A buffer the reader has since edited is theirs now, whoever made it."
+  (dolist (buffer (plist-get (align-buffer-plan-properties
+                              (align-buffer-session-plan session))
+                             :owned-buffers))
+    (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
+      (kill-buffer buffer))))
 
 (defun align-buffer--pane-killed ()
   "Tear the session down when one of its panes is killed out of band."
