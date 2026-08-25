@@ -235,6 +235,57 @@ Return (POSITIONS . GUTTER-WIDTH), the row positions and the gutter's width."
       (align-buffer--set-gutter-width width))
     (cons positions width)))
 
+(defun align-buffer--refresh-row-faces (session row-index side starts)
+  "Copy the faces of SESSION's row ROW-INDEX in SIDE again, and say whether.
+Nothing is copied when the source line no longer reads as the row does.
+STARTS is the source's line-start vector."
+  (let* ((cell (align-buffer-cell session row-index side))
+         (fresh (align-buffer--line-text (align-buffer-cell-source cell)
+                                         starts
+                                         (align-buffer-cell-line cell)))
+         (beginning (align-buffer-row-beginning-position session row-index side)))
+    (with-current-buffer (align-buffer-buffer session side)
+      (let ((end (save-excursion (goto-char beginning) (line-end-position))))
+        ;; Properties only, never the text: a row's overlays - the gutter, the
+        ;; row face, a decoration's - hang off these positions.  Which is also
+        ;; why the two texts have to be the same one: a source edited since the
+        ;; plan was made would have its faces painted over text that no longer
+        ;; matches, so a word coloured as a type would sit on whatever the pane
+        ;; still shows there.  `string=' compares characters and ignores the
+        ;; properties, which is the comparison wanted here.
+        (when (string= fresh (buffer-substring-no-properties beginning end))
+          (with-silent-modifications
+            (set-text-properties beginning end nil)
+            (dotimes (offset (length fresh))
+              (let ((properties (text-properties-at offset fresh)))
+                (when properties
+                  (add-text-properties (+ beginning offset)
+                                       (+ beginning offset 1)
+                                       properties)))))
+          t)))))
+
+(defun align-buffer-refresh-faces (session buffer &optional first-line last-line)
+  "Copy BUFFER's faces into SESSION's panes again, returning how many rows moved.
+Only rows reading BUFFER, and of those only the ones between FIRST-LINE and
+LAST-LINE when either is given.  For a fontifier that answers after the panes
+were built, a language server's semantic tokens among them."
+  (let ((starts (align-buffer--line-starts buffer))
+         (rows (align-buffer-rows session))
+         (refreshed 0))
+    (dolist (side '(left right))
+      (dotimes (row-index (length rows))
+        (let ((cell (align-buffer-cell session row-index side)))
+          (when (and (eq (align-buffer-cell-kind cell) 'line)
+                     (eq (align-buffer-cell-source cell) buffer)
+                     (or (null first-line)
+                         (>= (align-buffer-cell-line cell) first-line))
+                     (or (null last-line)
+                         (<= (align-buffer-cell-line cell) last-line))
+                     (align-buffer--refresh-row-faces session row-index side
+                                                      starts))
+            (setq refreshed (1+ refreshed))))))
+    refreshed))
+
 (defun align-buffer-render (session)
   "Build both of SESSION's panes and fill in its maps."
   (let* ((plan (align-buffer-session-plan session))

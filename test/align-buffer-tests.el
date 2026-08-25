@@ -648,6 +648,101 @@ that knows the intra-line difference can supply."
             (align-buffer-quit session)))
       (kill-buffer source))))
 
+(ert-deftest align-buffer-test-faces-can-be-copied-again ()
+  "A face the source gains after the build reaches the pane on a refresh.
+Which is what a language server's semantic tokens need: they arrive well after
+the panes were rendered."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (progn
+            (should (null (with-current-buffer (align-buffer-buffer session 'left)
+                            (get-text-property (point-min) 'face))))
+            (with-current-buffer old
+              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
+            (should (= (align-buffer-refresh-faces session old) 3))
+            (should (eq (with-current-buffer (align-buffer-buffer session 'left)
+                          (get-text-property (point-min) 'face))
+                        'success)))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-copying-again-keeps-to-one-source ()
+  "A refresh touches only the rows that read the buffer it was given."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (progn
+            (with-current-buffer new
+              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
+            ;; The right pane reads `new' on all four rows, the left never.
+            (should (= (align-buffer-refresh-faces session new) 4))
+            (should (null (with-current-buffer (align-buffer-buffer session 'left)
+                            (get-text-property (point-min) 'face)))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-copying-again-can-take-a-line-range ()
+  "A refresh limited to a line range leaves the rows outside it alone."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (progn
+            (with-current-buffer old
+              (put-text-property (point-min) (point-max) 'face 'success))
+            (should (= (align-buffer-refresh-faces session old 2 3) 2))
+            ;; Row zero reads line one, which the range left out.
+            (should (null (with-current-buffer (align-buffer-buffer session 'left)
+                            (get-text-property (point-min) 'face)))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-copying-again-skips-a-line-of-another-length ()
+  "A source line that has grown or shrunk means a stale plan, so it is skipped."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (progn
+            (with-current-buffer old
+              (goto-char (point-min))
+              (insert "much longer now ")
+              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
+            (should (= (align-buffer-refresh-faces session old 1 1) 0)))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-copying-again-skips-a-line-that-reads-otherwise ()
+  "A source line rewritten to the same length is skipped too.
+Its faces describe text the pane does not show, so painting them would colour
+whatever happens to sit at those offsets."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (progn
+            (with-current-buffer old
+              ;; "alpha" becomes "ALPHA", same length, every character different.
+              (goto-char (point-min))
+              (delete-region (point-min) (+ (point-min) 5))
+              (insert "ALPHA")
+              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
+            (should (= (align-buffer-refresh-faces session old 1 1) 0))
+            (should (null (with-current-buffer (align-buffer-buffer session 'left)
+                            (get-text-property (point-min) 'face))))
+            ;; And the pane still shows what the plan was made from.
+            (should (equal (with-current-buffer (align-buffer-buffer session 'left)
+                             (buffer-substring-no-properties
+                              (point-min) (+ (point-min) 5)))
+                           "alpha")))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-copying-again-keeps-the-overlays ()
+  "A refresh replaces properties, not text, so the gutter survives it."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (with-current-buffer (align-buffer-buffer session 'left)
+            (let ((before (length (align-buffer-tests--gutter-overlays))))
+              (align-buffer-refresh-faces session old)
+              (should (= (length (align-buffer-tests--gutter-overlays)) before))
+              (should-not (buffer-modified-p))))
+        (align-buffer-quit session)))))
+
 (ert-deftest align-buffer-test-gutter-width ()
   "The gutter is as wide as its largest number, and absent without numbers."
   (align-buffer-tests--with-plan plan
