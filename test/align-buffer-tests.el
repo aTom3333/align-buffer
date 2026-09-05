@@ -495,6 +495,39 @@ makes a later scroll back to the same row the user's own."
       (should (equal (mapcar #'car (reverse seen)) '(build layout teardown)))
       (should (equal (nth 2 (assq 'layout seen)) 2)))))
 
+(ert-deftest align-buffer-test-quit-collapses-onto-the-window-a-hook-left ()
+  "Quit collapses onto whichever pane window its teardown hook left on screen.
+A consumer grouping the panes deletes one of them from that hook, and the other
+may then be the only ordinary window on the frame."
+  (align-buffer-tests--with-plan plan
+    (delete-other-windows)
+    (let* ((align-buffer-pre-teardown-functions
+            (list (lambda (session)
+                    (delete-window (get-buffer-window
+                                    (align-buffer-buffer session 'left))))))
+           (session (align-buffer-show plan))
+           (survivor (get-buffer-window (align-buffer-buffer session 'right))))
+      (align-buffer-quit session)
+      (should (window-live-p survivor))
+      (should (equal (window-list nil 'no-mini) (list survivor))))))
+
+(ert-deftest align-buffer-test-quit-spares-a-window-that-holds-no-pane ()
+  "Quit deletes the pane windows its teardown hook left, and nothing besides.
+The place the panes held stays on the frame, showing what it falls back to."
+  (align-buffer-tests--with-plan plan
+    (delete-other-windows)
+    (let* ((other (split-window nil nil 'below))
+           (align-buffer-pre-teardown-functions
+            (list (lambda (session)
+                    (delete-window (get-buffer-window
+                                    (align-buffer-buffer session 'left))))))
+           (session (align-buffer-show plan))
+           (survivor (get-buffer-window (align-buffer-buffer session 'right))))
+      (align-buffer-quit session)
+      (should (window-live-p other))
+      (should (window-live-p survivor))
+      (should (= (length (window-list nil 'no-mini)) 2)))))
+
 (ert-deftest align-buffer-test-rebuild-lets-a-consumer-redraw ()
   "A rebuild runs the build and layout hooks, and spares what a consumer drew.
 Rendering clears the panes, so a decoration is gone and its owner needs both the
