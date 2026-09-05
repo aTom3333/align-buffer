@@ -127,6 +127,12 @@ OLD and NEW are one-based line numbers in the buffers that were compared."
         (push (list 'added (cl-incf new-line)) operations))))
     (nreverse operations)))
 
+(defun align-diff--every-line-same (old new)
+  "Return the operations pairing every line of OLD with the same line of NEW."
+  (cl-loop for line from 1 to (min (align-diff--line-count old)
+                                   (align-diff--line-count new))
+           collect (list 'same line line)))
+
 
 ;;; Building the plan
 
@@ -185,15 +191,12 @@ OLD and NEW are one-based line numbers in the buffers that were compared."
 
 (defun align-diff-plan (old new &optional properties)
   "Return an align-buffer plan aligning buffer OLD against buffer NEW.
-PROPERTIES are carried on the plan.
-Signals a `user-error' when the two hold the same text."
+PROPERTIES are carried on the plan."
   (dolist (buffer (list old new))
     (unless (buffer-live-p buffer)
       (error "Not a live buffer: %S" buffer)))
-  (let ((operations (align-diff--operations (align-diff--unified old new))))
-    (when (null operations)
-      (user-error "No differences between %s and %s"
-                  (buffer-name old) (buffer-name new)))
+  (let ((operations (or (align-diff--operations (align-diff--unified old new))
+                        (align-diff--every-line-same old new))))
     (align-buffer-plan-create
      :rows (align-diff--rows operations old new)
      :left-name (format "*align-diff old: %s*" (buffer-name old))

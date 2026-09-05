@@ -40,10 +40,16 @@ A blank cell reads as nil, so the shape says which side a row stands on."
                   (align-buffer-cell-face (align-buffer-row-right row))))
           (append (align-buffer-plan-rows plan) nil)))
 
-(ert-deftest align-diff-test-identical-buffers-refuse ()
-  "Two buffers holding the same text have nothing to show."
+(ert-deftest align-diff-test-identical-buffers-align-line-by-line ()
+  "Two buffers holding the same text align every line, with no change."
   (align-diff-tests--with-buffers "one\ntwo\n" "one\ntwo\n"
-    (should-error (align-diff-plan old new) :type 'user-error)))
+    (should (equal (align-diff-tests--shape (align-diff-plan old new))
+                   '((nil 1 1) (nil 2 2))))))
+
+(ert-deftest align-diff-test-empty-buffers-align-to-no-rows ()
+  "Two empty buffers have no line to align."
+  (align-diff-tests--with-buffers "" ""
+    (should (equal (align-diff-tests--shape (align-diff-plan old new)) nil))))
 
 (ert-deftest align-diff-test-context-rows-read-both-sides ()
   "An unchanged line is one row reading its own line number on each side."
@@ -103,7 +109,8 @@ the right."
 Reviewing a CRLF file against a LF revision otherwise shows every line as
 changed."
   (align-diff-tests--with-buffers "one\r\ntwo\r\n" "one\ntwo\n"
-    (should-error (align-diff-plan old new) :type 'user-error))
+    (should (equal (align-diff-tests--shape (align-diff-plan old new))
+                   '((nil 1 1) (nil 2 2)))))
   (align-diff-tests--with-buffers "one\r\ntwo\r\n" "one\ntwo\n"
     (let ((align-diff-switches nil))
       (should (equal (align-diff-tests--shape (align-diff-plan old new))
