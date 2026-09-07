@@ -284,6 +284,107 @@ cost a keypress that appears to do nothing."
       (kill-buffer old)
       (kill-buffer new))))
 
+(defmacro align-buffer-tests--with-boundary-handler (handled &rest body)
+  "Run BODY with a boundary handler returning HANDLED, and `calls' bound.
+`calls' collects the (SESSION . REMAINING) the handler was given, in order."
+  (declare (indent 1))
+  `(let* ((calls nil)
+          (align-buffer-section-boundary-functions
+           (list (lambda (boundary-session remaining)
+                   (setq calls (append calls
+                                       (list (cons boundary-session remaining))))
+                   ,handled))))
+     ,@body))
+
+(ert-deftest align-buffer-test-a-boundary-handler-stands-in-for-the-error ()
+  "A handler taking the boundary leaves the command quiet and point where it is."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (align-buffer-tests--with-boundary-handler t
+            (with-current-buffer (align-buffer-buffer session 'right)
+              (goto-char (point-min))
+              (align-buffer-next-section)
+              (should (= (align-buffer-row-at-point) 1))
+              (align-buffer-next-section)
+              (should (= (align-buffer-row-at-point) 1))
+              (should (equal calls (list (cons session 1))))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-a-boundary-handler-may-decline ()
+  "A handler returning nil has not taken the boundary, so the error stands."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (align-buffer-tests--with-boundary-handler nil
+            (with-current-buffer (align-buffer-buffer session 'right)
+              (goto-char (point-min))
+              (align-buffer-next-section)
+              (should-error (align-buffer-next-section) :type 'user-error)
+              (should (equal calls (list (cons session 1))))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-a-handled-boundary-ends-the-move ()
+  "The moves left over are not spent once a handler has taken the boundary.
+It may have moved us somewhere else, where they mean nothing."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (align-buffer-tests--with-boundary-handler t
+            (with-current-buffer (align-buffer-buffer session 'right)
+              (goto-char (point-min))
+              (align-buffer-next-section 3)
+              (should (= (align-buffer-row-at-point) 1))
+              (should (equal calls (list (cons session 2))))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-a-backward-boundary-counts-down ()
+  "Going backwards the moves left are negative, so a handler knows which way."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (align-buffer-tests--with-boundary-handler t
+            (with-current-buffer (align-buffer-buffer session 'right)
+              (goto-char (point-min))
+              (align-buffer-next-section)
+              (align-buffer-previous-section)
+              (should (equal calls (list (cons session -1))))))
+        (align-buffer-quit session)))))
+
+(ert-deftest align-buffer-test-a-plan-with-no-sections-reaches-the-hook ()
+  "A plan calling nothing interesting is a boundary like running out of them."
+  (let* ((old (align-buffer-tests--source " *sectionless old*" "one\ntwo\n"))
+         (new (align-buffer-tests--source " *sectionless new*" "one\ntwo\n"))
+         (plan (align-buffer-tests--big-plan old new 2)))
+    (unwind-protect
+        (let ((session (align-buffer-show plan)))
+          (unwind-protect
+              (align-buffer-tests--with-boundary-handler t
+                (with-current-buffer (align-buffer-buffer session 'right)
+                  (should (equal (align-buffer-session-sections session) []))
+                  (goto-char (point-min))
+                  (align-buffer-next-section)
+                  (should (equal calls (list (cons session 1))))))
+            (align-buffer-quit session)))
+      (kill-buffer old)
+      (kill-buffer new))))
+
+(ert-deftest align-buffer-test-a-boundary-handler-for-one-session-only ()
+  "The hook made buffer-local in a pane is that session's own handler."
+  (align-buffer-tests--with-plan plan
+    (let ((session (align-buffer-show plan)))
+      (unwind-protect
+          (let ((taken nil))
+            (with-current-buffer (align-buffer-buffer session 'right)
+              (add-hook 'align-buffer-section-boundary-functions
+                        (lambda (_session _remaining) (setq taken t))
+                        nil t)
+              (goto-char (point-min))
+              (align-buffer-next-section)
+              (align-buffer-next-section)
+              (should taken)))
+        (align-buffer-quit session)))))
+
 (ert-deftest align-buffer-test-a-settled-viewport-is-left-alone ()
   "A window whose point clears its margins is already where it will stay."
   (should (= (align-buffer--settled-top-row 20 51 5 40) 20)))

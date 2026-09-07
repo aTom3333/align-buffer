@@ -13,6 +13,11 @@
 ;; by stepping through an index: the next section is the one with the earliest
 ;; start after the current row.  That always moves, whatever the sections
 ;; overlap.
+;;
+;; Running out of sections is a hook, `align-buffer-section-boundary-functions',
+;; so a consumer showing one file of several can move to the next one instead of
+;; stopping.  On its own, navigation says there is no more and leaves point
+;; where it is.
 
 ;;; Code:
 
@@ -71,6 +76,27 @@ The latest start below ROW-INDEX, with the same tie-break as forwards."
     (align-buffer--centre-section (selected-window) section)))
 
 
+;;; Running out of sections
+
+(defvar align-buffer-section-boundary-functions nil
+  "Functions run when section navigation has nowhere left to go.
+Called with the session and how many moves are left to make, the one that
+could not be made included: positive going forwards, negative going backwards.
+The first to return non-nil has handled the boundary, and the command stops
+there rather than spending the moves that are left.  When none does, the
+command signals a `user-error'.
+
+The panes are ordinary buffers, so a handler for one session alone is this hook
+made buffer-local in that session's panes.")
+
+(defun align-buffer--section-boundary (session remaining message)
+  "Hand SESSION's boundary to the hook, or signal MESSAGE as a `user-error'.
+REMAINING is the signed count of moves still to make."
+  (or (run-hook-with-args-until-success
+       'align-buffer-section-boundary-functions session remaining)
+      (user-error "%s" message)))
+
+
 ;;; Commands
 
 (defun align-buffer-next-section (&optional count)
@@ -84,19 +110,29 @@ The latest start below ROW-INDEX, with the same tie-break as forwards."
   (align-buffer--move-section (- (or count 1))))
 
 (defun align-buffer--move-section (count)
-  "Move COUNT sections forward, or backward when COUNT is negative."
+  "Move COUNT sections forward, or backward when COUNT is negative.
+A plan with no sections at all is a boundary like any other."
   (let* ((session (or (align-buffer-current-session)
                       (user-error "Not in an align-buffer pane")))
-         (sections (align-buffer-session-sections session)))
-    (when (zerop (length sections))
-      (user-error "Nothing to navigate"))
-    (dotimes (_ (abs count))
-      (let* ((row-index (align-buffer-row-at-point))
-             (index (if (> count 0)
-                        (align-buffer--section-after row-index sections)
-                      (align-buffer--section-before row-index sections))))
-        (unless index (user-error "No more sections"))
-        (align-buffer--goto-section session index)))))
+         (sections (align-buffer-session-sections session))
+         (step (if (> count 0) 1 -1))
+         (remaining count))
+    (if (zerop (length sections))
+        (align-buffer--section-boundary session remaining "Nothing to navigate")
+      (while (not (zerop remaining))
+        (let* ((row-index (align-buffer-row-at-point))
+               (index (if (> step 0)
+                          (align-buffer--section-after row-index sections)
+                        (align-buffer--section-before row-index sections))))
+          (cond
+           (index
+            (align-buffer--goto-section session index)
+            (cl-decf remaining step))
+           (t
+            ;; A handler may well have moved us to another session, where the
+            ;; moves that are left mean nothing.
+            (align-buffer--section-boundary session remaining "No more sections")
+            (setq remaining 0))))))))
 
 (defun align-buffer-visit-source ()
   "Go to the position in the source buffer that this row stands for.
