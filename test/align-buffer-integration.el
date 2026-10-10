@@ -177,6 +177,18 @@ Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
     (align-buffer--set-point window (align-buffer-line-position buffer point-line))
     (align-buffer-integration--settle)))
 
+(defun align-buffer-integration--note (session side line rows)
+  "Hang ROWS screen rows of display above LINE of SESSION's SIDE buffer."
+  (let ((buffer (align-buffer-buffer session side)))
+    (with-current-buffer buffer
+      (let ((overlay (make-overlay (align-buffer-line-position buffer line)
+                                   (align-buffer-line-position buffer line))))
+        (overlay-put overlay 'before-string
+                     (mapconcat (lambda (row) (format "a note, row %d\n" row))
+                                (number-sequence 1 rows)
+                                "")))
+      (set-buffer-modified-p nil))))
+
 (defun align-buffer-integration--lengthen (session line)
   "Make LINE of both of SESSION's buffers wider than the window showing it."
   (dolist (side '(left right))
@@ -424,6 +436,30 @@ Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
      'quitting-gives-the-window-back "and both buffers are gone with the session"
      '(nil nil) (list (buffer-live-p left) (buffer-live-p right)))))
 
+;;; Fails without measuring rows as the display makes them (`row-pixels'), and
+;;; fails too when the measuring is added up a step at a time (`row-sum').  The
+;;; note hangs two rows above the line the follower has to show, and those rows
+;;; are display rather than text: `vertical-motion' walks straight past them.
+(align-buffer-integration-defscenario a-note-above-the-follower
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--note session 'right 30 2)
+    (align-buffer-integration--lengthen session 35)
+    ;; Centred, so the note and the long line both sit between the follower's
+    ;; start and the line it has to show.
+    (align-buffer-integration--go session 'left 40)
+    (align-buffer-integration--expect
+     'a-note-above-the-follower "level with a note above the follower's line"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-integration--keys "C-n C-n C-n")
+    (align-buffer-integration--expect
+     'a-note-above-the-follower "and level three lines on"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-integration--keys "C-p C-p")
+    (align-buffer-integration--expect
+     'a-note-above-the-follower "and level coming back"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
 ;;; Point past the bottom margin with the end of the buffer already on screen.
 ;;; Passes with `settling-cap' undone as well: redisplay moves the leader here
 ;;; whatever the prediction, and a leader that moves fires its scroll hook and
@@ -516,17 +552,23 @@ the run can be repeated with it undone.  Rule 1 has no entry: the target is
 worked out inside the placement itself and there is no cached row left to
 stale.
 
-Measured, one run per name.  Seven of the eleven are caught:
+Measured, one run per name.  Nine of the thirteen are caught:
 
   defer-timer               wheel-over-the-inactive-window,
                             wheel-burst-over-the-inactive-window,
                             one-notch-on-each-window
   clamp-off-screen-anchor   an-unpaired-run-holds-the-follower
-  placed-flag               an-unpaired-run-holds-the-follower
+  placed-flag               an-unpaired-run-holds-the-follower,
+                            a-note-above-the-follower,
+                            arriving-at-the-end-of-the-buffer,
+                            the-end-of-the-follower-does-not-lead
   clamp-floor               the-top-of-the-buffer-holds-its-point
   can-lead                  a-transient-window-does-not-lead
   point-row-room            the-end-of-the-follower-does-not-lead
-  row-count                 a-long-line-above-the-anchor
+  row-count                 a-long-line-above-the-anchor,
+                            a-note-above-the-follower
+  row-pixels                a-note-above-the-follower
+  row-sum                   a-note-above-the-follower
 
 And four are caught by nothing here:
 
@@ -558,22 +600,37 @@ And four are caught by nothing here:
     ("clamp-off-screen-anchor"
      ;; The unclamped reading, which lets a pair above the leader's top take a
      ;; negative row and so drags the follower on by the height of the run.
+     ;; All three halves are needed: the clamp is read twice, once where the
+     ;; row is worked out and once where it is turned into a start.
+     (defun align-buffer--leader-row (window position)
+       (let ((start (window-start window)))
+         (if (>= position start)
+             (- (or (align-buffer--rows-from-start window position) 0)
+                (align-buffer--settling-correction window))
+           (- (align-buffer--rows-between window position start)))))
      (defun align-buffer--target (session side leader follower)
        (let* ((leader-buffer (window-buffer leader))
               (line (align-buffer-line-at leader-buffer (window-point leader)))
               (anchor (and line (align-buffer-anchor session side line))))
          (when anchor
            (let* ((height (max 1 (window-body-height follower)))
-                  (own-position (align-buffer-line-position
-                                 leader-buffer (car anchor)))
                   (other-position (align-buffer-line-position
                                    (window-buffer follower) (cdr anchor)))
-                  (start (window-start leader))
-                  (rows (if (>= own-position start)
-                            (count-screen-lines start own-position nil leader)
-                          (- (count-screen-lines own-position start nil leader)))))
+                  (rows (if (> (car anchor) line)
+                            0
+                          (align-buffer--leader-row
+                           leader
+                           (align-buffer-line-position
+                            leader-buffer (car anchor))))))
              (when other-position
-               (cons other-position (min (1- height) rows))))))))
+               (cons other-position (min (1- height) rows)))))))
+     (defun align-buffer--start-for-rows (window position rows)
+       (if (zerop rows)
+           (cons position 0)
+         (pcase-let ((`(,start . ,moved)
+                      (align-buffer--position-rows-below
+                       window position (- rows))))
+           (cons start (- moved))))))
     ("defer-timer"
      (defun align-buffer--defer-place (session window side leader)
        (setq align-buffer--pending-place (list session window side leader))))
@@ -600,6 +657,53 @@ And four are caught by nothing here:
        (align-buffer--window-big-enough-p window)))
     ("point-row-room"
      (defun align-buffer--start-leaving-room (_window start _rows) start))
+    ("row-pixels"
+     ;; Rows counted by walking the text, which is blind to the rows an overlay
+     ;; hangs above a line.
+     (defun align-buffer--rows-from-start (window position)
+       (let ((start (window-start window))
+             (height (max 1 (window-body-height window))))
+         (when (>= position start)
+           (with-current-buffer (window-buffer window)
+             (save-excursion
+               (goto-char start)
+               (let ((row 0)
+                     (answer (and (= position start) 0)))
+                 (while (and (null answer) (< row height))
+                   (if (<= (vertical-motion 1 window) 0)
+                       (setq answer row)
+                     (cond ((> (point) position) (setq answer row))
+                           ((= (point) position) (setq answer (1+ row)))
+                           (t (setq row (1+ row))))))
+                 (when (and answer (< answer height)) answer))))))))
+    ("row-sum"
+     ;; The measuring added up a step at a time, which comes to a row more than
+     ;; the span is worth wherever a step lands inside a wrapped line.
+     (defun align-buffer--start-for-rows (window position rows)
+       (if (<= rows 0)
+           (cons position 0)
+         (let ((row-height (align-buffer--row-height window)))
+           (with-current-buffer (window-buffer window)
+             (save-excursion
+               (goto-char position)
+               (let ((best position) (best-rows 0) (pixels 0) (done nil))
+                 (while (not done)
+                   (let ((below (point)))
+                     (if (zerop (vertical-motion -1 window))
+                         (setq done t)
+                       (setq pixels (+ pixels (align-buffer--pixels-between
+                                               window (point) below)))
+                       (let ((got (round pixels row-height)))
+                         (cond ((<= got rows)
+                                (setq best (point))
+                                (setq best-rows got)
+                                (when (= got rows) (setq done t)))
+                               (t
+                                (when (< (- got rows) (- rows best-rows))
+                                  (setq best (point))
+                                  (setq best-rows got))
+                                (setq done t)))))))
+                 (cons best best-rows))))))))
     ("settling-cap"
      ;; The correction as predicted, with no account of whether the window has
      ;; anywhere to scroll.
