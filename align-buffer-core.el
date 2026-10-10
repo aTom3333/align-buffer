@@ -1,13 +1,22 @@
-;;; align-buffer-core.el --- Types and maps for align-buffer -*- lexical-binding: t; -*-
+;;; align-buffer-core.el --- Types and the line correspondence -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; The alignment plan, the session built from it, and the map between a pane row
-;; and the source line it stands for.  Every other file builds on these.
+;; The session, and the map between a line of one buffer and the line of the
+;; other it stands level with.
 ;;
-;; A pane holds exactly one real line per row, so a row index is a pane line
-;; number minus one.  That is why the map needs no table from positions back to
-;; rows.
+;; A correspondence is a set of (LEFT-LINE . RIGHT-LINE) pairs and nothing
+;; more.  Three things it is not:
+;;
+;;   not monotonic  a block that moved pairs its old lines with new ones far
+;;                  away, so the right lines are in no particular order.
+;;   not total      a line with no counterpart is simply absent.
+;;   not one to one several lines may pair with the same line facing them.
+;;
+;; Every question the sync asks is "which pair governs this line", and the
+;; answer is the pair with the greatest line at or below it.  Each side
+;; therefore gets its own index sorted by its own line: pairs sorted by the
+;; left line are in no useful order for a question about the right one.
 
 ;;; Code:
 
@@ -15,137 +24,43 @@
 (require 'seq)
 
 (defgroup align-buffer nil
-  "Show two buffers side by side with their lines aligned."
+  "Show two buffers side by side with corresponding lines level."
   :group 'convenience
   :prefix "align-buffer-")
 
 
-;;; Customization
-
-(defcustom align-buffer-show-gutter t
-  "When non-nil, show a line-number gutter beside each pane."
-  :type 'boolean
-  :group 'align-buffer)
-
-(defcustom align-buffer-copied-locals '(tab-width)
-  "Buffer-local variables a pane copies from its source buffer."
-  :type '(repeat variable)
-  :group 'align-buffer)
-
-(defcustom align-buffer-copied-text-properties
-  '(face font-lock-face syntax-table)
-  "Text properties kept when a source line is copied into a pane.
-Everything else is dropped, `category' included: it is an indirection whose
-symbol plist can supply further properties."
-  :type '(repeat symbol)
-  :group 'align-buffer)
-
-(defface align-buffer-gutter '((t :inherit line-number))
-  "Face for the line numbers beside a pane."
-  :group 'align-buffer)
-
-
-;;; The plan
-
-(cl-defstruct (align-buffer-cell (:constructor align-buffer-cell-create)
-                                 (:copier nil))
-  "One side of one row.
-
-KIND is `blank', `line' or `text', and it decides which of the rest apply:
-
-  blank  padding.  The pane gets an empty line and no gutter number.
-  line   SOURCE, a buffer, and LINE, its one-based line number.
-  text   TEXT, a string with no newline, standing for no line of any buffer.
-
-NUMBER is an integer to show in the gutter, defaulting to LINE.  FACE is a face
-or a list of faces, covering the whole row.  REFINEMENT is a list of
-(BEG END FACE), character offsets into the row's text and the face to cover them
-with, for a generator that knows which characters within the line differ.
-
-The slots a KIND does not use are nil, and no consumer may read them: a `blank'
-cell has no SOURCE, and a `text' cell's LINE means nothing.  Emacs Lisp has no
-sum type to make that unrepresentable, so it is an invariant to keep rather than
-one the compiler keeps for us."
-  (kind 'blank)
-  source
-  line
-  text
-  number
-  face
-  refinement)
-
-(cl-defstruct (align-buffer-row (:constructor align-buffer-row-create)
-                                (:copier nil))
-  "One aligned row: what the two panes show on the same screen line.
-
-LEFT and RIGHT are `align-buffer-cell' structs; a side left unspecified shows
-nothing, so a row is well formed with neither.
-
-TAG is any symbol, and is opaque to us.  Non-nil marks the row as interesting,
-and a run of adjacent rows whose tags are `eq' becomes one section.  That covers
-the common case; a generator wanting sections that overlap or nest supplies them
-through the plan instead, since no tagging of single rows can express those."
-  (left (align-buffer-cell-create))
-  (right (align-buffer-cell-create))
-  tag)
-
-(cl-defstruct (align-buffer-plan (:constructor align-buffer-plan-create)
-                                 (:copier nil))
-  "An ordered set of rows plus what the panes need in order to show them.
-
-ROWS is a vector or a list of `align-buffer-row'.  LEFT-NAME and RIGHT-NAME are
-strings.  LEFT-PARAMETERS and RIGHT-PARAMETERS are plists as built by
-`align-buffer-parameters-from-buffer'.  SECTIONS is a vector or list of
-\(FIRST-ROW . LAST-ROW) pairs.
-
-PROPERTIES is a plist the generator keeps its own state in.  One key is read
-from it: `:owned-buffers', a list of buffers to kill when the session is torn
-down, for a generator that made a buffer to read from.
-
-SECTIONS may overlap and nest: a moved block and the hunks inside it are all
-sections.  Supplying it replaces what the rows' tags would have said."
-  rows
-  left-name
-  right-name
-  left-parameters
-  right-parameters
-  sections
-  properties)
+;;; The session
 
 (cl-defstruct (align-buffer-session (:constructor align-buffer-session-create)
                                     (:copier nil))
-  "A built plan: the two panes and the map between rows and source lines.
+  "Two buffers kept scrolled to each other, and what corresponds between them.
 
-LEFT-BUFFER and RIGHT-BUFFER are the pane buffers, and they are the session's
-identity.  LEFT-POSITIONS and RIGHT-POSITIONS are vectors of buffer positions,
-indexed by row.  SOURCE-ROWS is a hash table from a (BUFFER . LINE) cons to the
-list of (ROW-INDEX . SIDE) pairs showing that line, which is one-to-many.
-SOURCES is a hash table from a source buffer to the list of sides reading it.
-SECTIONS is a vector of (FIRST-ROW . LAST-ROW) pairs.  HEIGHTS is empty while
-every row is one screen line.  DECORATIONS and PROPERTIES are alists for
-extensions."
-  plan
+LEFT-BUFFER and RIGHT-BUFFER are the buffers themselves, and they are the
+session's identity.  LEFT-INDEX and RIGHT-INDEX are vectors of (OWN . OTHER)
+line pairs sorted by OWN, one for asking from each side.  LEFT-POINT and
+RIGHT-POINT are where point was when the session was built.  WINDOWS are the
+windows the layout put the buffers in.
+
+PROPERTIES is a plist the consumer keeps its own state in.  One key is read
+from it: `:owned-buffers', a list of buffers to kill when the session ends,
+for a consumer that made a buffer to show."
   left-buffer
   right-buffer
-  left-positions
-  right-positions
-  source-rows
-  sources
-  left-gutter-width
-  right-gutter-width
-  sections
-  heights
-  decorations
+  left-index
+  right-index
+  left-point
+  right-point
+  windows
   properties)
 
 
-;;; Pane-local state
+;;; Buffer-local state
 
 (defvar-local align-buffer--session nil
-  "The session this pane belongs to.")
+  "The session this buffer belongs to.")
 
 (defvar-local align-buffer--side nil
-  "Which side of its session this pane is, `left' or `right'.")
+  "Which side of its session this buffer is, `left' or `right'.")
 
 
 ;;; The registry
@@ -159,215 +74,123 @@ extensions."
         (seq-filter #'align-buffer-session-live-p align-buffer--sessions)))
 
 (defun align-buffer-session-live-p (session)
-  "Return non-nil when both of SESSION's panes are still alive."
+  "Return non-nil when both of SESSION's buffers are still alive."
   (and (buffer-live-p (align-buffer-session-left-buffer session))
        (buffer-live-p (align-buffer-session-right-buffer session))))
 
 (defun align-buffer-current-session ()
-  "Return the session of the current buffer's pane, or nil outside one."
+  "Return the session of the current buffer, or nil when it is in none."
   (and align-buffer--session
        (align-buffer-session-live-p align-buffer--session)
        align-buffer--session))
 
-(defun align-buffer-sessions-for-source (buffer)
-  "Return the live sessions showing any line of BUFFER."
-  (seq-filter (lambda (session)
-                (memq buffer (align-buffer-sources session)))
-              (align-buffer-sessions)))
-
-
-;;; Reading the plan
+(defun align-buffer-session-for (buffer)
+  "Return the live session BUFFER belongs to, or nil."
+  (and (buffer-live-p buffer)
+       (let ((session (buffer-local-value 'align-buffer--session buffer)))
+         (and session (align-buffer-session-live-p session) session))))
 
 (defun align-buffer-side ()
-  "Return which pane the current buffer is, `left' or `right', or nil."
+  "Return which side of its session this buffer is, `left' or `right'."
   align-buffer--side)
-
-(defun align-buffer-rows (session)
-  "Return SESSION's rows."
-  (align-buffer-plan-rows (align-buffer-session-plan session)))
-
-(defun align-buffer-row-count (session)
-  "Return how many rows SESSION has."
-  (length (align-buffer-rows session)))
-
-(defun align-buffer-row (session row-index)
-  "Return SESSION's row at ROW-INDEX, or nil when it is out of range."
-  (let ((rows (align-buffer-rows session)))
-    (and (>= row-index 0) (< row-index (length rows)) (aref rows row-index))))
-
-(defun align-buffer-row-cell (row side)
-  "Return SIDE's cell of ROW, which is a row struct."
-  (if (eq side 'left) (align-buffer-row-left row) (align-buffer-row-right row)))
-
-(defun align-buffer-cell (session row-index side)
-  "Return SIDE's cell of SESSION's row at ROW-INDEX."
-  (let ((row (align-buffer-row session row-index)))
-    (and row (align-buffer-row-cell row side))))
 
 (defun align-buffer-other-side (side)
   "Return the side facing SIDE."
   (if (eq side 'left) 'right 'left))
 
 (defun align-buffer-buffer (session side)
-  "Return SESSION's pane buffer for SIDE."
+  "Return SESSION's buffer for SIDE."
   (if (eq side 'left)
       (align-buffer-session-left-buffer session)
     (align-buffer-session-right-buffer session)))
 
-(defun align-buffer-positions (session side)
-  "Return SESSION's vector of row positions for SIDE."
+(defun align-buffer-index (session side)
+  "Return SESSION's correspondence index for asking from SIDE."
   (if (eq side 'left)
-      (align-buffer-session-left-positions session)
-    (align-buffer-session-right-positions session)))
-
-(defun align-buffer-parameters (plan side)
-  "Return PLAN's parameters for SIDE."
-  (if (eq side 'left)
-      (align-buffer-plan-left-parameters plan)
-    (align-buffer-plan-right-parameters plan)))
-
-(defun align-buffer-cell-gutter-number (cell)
-  "Return the gutter number CELL should show, or nil for none."
-  (or (align-buffer-cell-number cell)
-      (and (eq (align-buffer-cell-kind cell) 'line)
-           (align-buffer-cell-line cell))))
+      (align-buffer-session-left-index session)
+    (align-buffer-session-right-index session)))
 
 
-;;; The map
+;;; Building the correspondence
 
-(defun align-buffer-row-at-point (&optional position)
-  "Return the row index shown at POSITION, defaulting to point.
-Valid in a pane, for any POSITION inside the row."
-  (let ((position (or position (point)))
-        (positions (and align-buffer--session
-                        align-buffer--side
-                        (align-buffer-positions align-buffer--session
-                                                align-buffer--side))))
-    (if (and positions (> (length positions) 0))
-        (align-buffer--row-for-position positions position)
-      (1- (line-number-at-pos position)))))
+(defun align-buffer-check-pairs (pairs)
+  "Signal unless every element of PAIRS is a cons of two line numbers."
+  (dolist (pair (append pairs nil))
+    (unless (and (consp pair)
+                 (integerp (car pair)) (> (car pair) 0)
+                 (integerp (cdr pair)) (> (cdr pair) 0))
+      (error "Not a pair of line numbers: %S" pair))))
 
-(defun align-buffer--row-for-position (positions position)
-  "Return the index of the last of POSITIONS at or before POSITION."
-  (let ((low 0)
-        (high (1- (length positions))))
-    (while (< low high)
-      (let ((middle (/ (+ low high 1) 2)))
-        (if (<= (aref positions middle) position)
-            (setq low middle)
-          (setq high (1- middle)))))
-    low))
+(defun align-buffer-build-index (pairs side)
+  "Return PAIRS as a vector of (OWN . OTHER) sorted by OWN, asked from SIDE.
+PAIRS is a list or a vector of (LEFT-LINE . RIGHT-LINE)."
+  (let ((entries (mapcar (if (eq side 'left)
+                             (lambda (pair) (cons (car pair) (cdr pair)))
+                           (lambda (pair) (cons (cdr pair) (car pair))))
+                         (append pairs nil))))
+    ;; A stable sort, so pairs sharing a line keep the order they were given.
+    (vconcat (sort entries (lambda (one other) (< (car one) (car other)))))))
 
-(defun align-buffer-row-beginning-position (session row-index side)
-  "Return where SESSION's row ROW-INDEX begins in SIDE's pane.
-A buffer position in that pane, of the row's first character, as
-`line-beginning-position' would give for the line."
-  (let ((positions (align-buffer-positions session side)))
-    (and positions (>= row-index 0) (< row-index (length positions))
-         (aref positions row-index))))
 
-(defun align-buffer-clamp-row (session row-index)
-  "Return ROW-INDEX brought inside SESSION's range."
-  (max 0 (min (1- (align-buffer-row-count session)) row-index)))
+;;; Asking the correspondence
 
-(defun align-buffer-source-rows (session buffer line)
-  "Return the (ROW-INDEX . SIDE) pairs of SESSION showing BUFFER's LINE."
-  (gethash (cons buffer line) (align-buffer-session-source-rows session)))
+(defun align-buffer-anchor (session side line)
+  "Return the pair of SESSION governing LINE on SIDE, as (OWN . OTHER).
 
-(defun align-buffer-sources (session &optional side)
-  "Return the buffers SESSION reads lines from, on SIDE or on both."
-  (let ((sources (align-buffer-session-sources session))
-        (found nil))
-    (when sources
-      (maphash (lambda (buffer sides)
-                 (when (or (null side) (memq side sides))
-                   (push buffer found)))
-               sources))
-    (nreverse found)))
+The pair with the greatest OWN at or below LINE.  When LINE sits above every
+pair there is none, and the first pair is returned instead; its OWN is then
+above LINE, which is how the two cases are told apart.  Nil when SIDE has no
+pairs at all.
 
-(defun align-buffer-source-line-position (buffer line &optional offset)
-  "Return the position of BUFFER's LINE, OFFSET characters in."
+Where several pairs share one OWN, the last one given decides."
+  (let ((index (align-buffer-index session side)))
+    (when (and index (> (length index) 0))
+      (if (> (car (aref index 0)) line)
+          (aref index 0)
+        (let ((low 0)
+              (high (1- (length index))))
+          (while (< low high)
+            (let ((middle (/ (+ low high 1) 2)))
+              (if (<= (car (aref index middle)) line)
+                  (setq low middle)
+                (setq high (1- middle)))))
+          (aref index low))))))
+
+(defun align-buffer-corresponding-line (session side line)
+  "Return the line facing SIDE's LINE in SESSION, or nil when nothing does."
+  (let ((anchor (align-buffer-anchor session side line)))
+    (and anchor (<= (car anchor) line) (cdr anchor))))
+
+
+;;; Lines and positions
+
+(defun align-buffer-line-position (buffer line)
+  "Return where LINE begins in BUFFER, counting from one and ignoring narrowing.
+A LINE past the end gives the last line, so a correspondence left stale by an
+edit still places the window somewhere rather than failing."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (save-restriction
         (widen)
         (save-excursion
           (goto-char (point-min))
-          (forward-line (1- line))
-          (min (+ (point) (or offset 0)) (line-end-position)))))))
+          (forward-line (1- (max 1 line)))
+          (point))))))
 
-(defun align-buffer-source-position (session row-index side &optional offset)
-  "Return (BUFFER . POSITION) for SESSION's ROW-INDEX on SIDE, OFFSET in.
-Nil when that side of the row shows no source line."
-  (let ((cell (align-buffer-cell session row-index side)))
-    (when (and cell (eq (align-buffer-cell-kind cell) 'line))
-      (let* ((buffer (align-buffer-cell-source cell))
-             (position (align-buffer-source-line-position
-                        buffer (align-buffer-cell-line cell) offset)))
-        (and position (cons buffer position))))))
-
-(defun align-buffer-pane-positions (session buffer line &optional offset)
-  "Return where BUFFER's LINE appears in SESSION's panes, OFFSET characters in.
-Each element is (POSITION ROW-INDEX . SIDE); empty when no row shows that line."
-  (mapcar (lambda (pair)
-            (let* ((row-index (car pair))
-                   (side (cdr pair))
-                   (start (align-buffer-row-beginning-position
-                           session row-index side))
-                   (limit (align-buffer--row-end session row-index side)))
-              (cons (min (+ start (or offset 0)) limit) pair)))
-          (align-buffer-source-rows session buffer line)))
-
-(defun align-buffer--row-end (session row-index side)
-  "Return where SESSION's row ROW-INDEX ends in SIDE's pane."
-  (let ((next (align-buffer-row-beginning-position session (1+ row-index) side)))
-    (if next
-        (1- next)
-      (with-current-buffer (align-buffer-buffer session side)
-        (max (point-min) (1- (point-max)))))))
+(defun align-buffer-line-at (buffer position)
+  "Return the line number of POSITION in BUFFER, ignoring narrowing."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (line-number-at-pos position t))))
 
 
-;;; Parameters
+;;; Windows
 
-(defun align-buffer-parameters-from-buffer (buffer)
-  "Return the pane parameters a pane showing BUFFER's lines should use."
-  (with-current-buffer buffer
-    (list :syntax-table (syntax-table)
-          :parse-sexp-lookup-properties parse-sexp-lookup-properties
-          :locals (delq nil
-                        (mapcar (lambda (variable)
-                                  (and (boundp variable)
-                                       (cons variable (symbol-value variable))))
-                                align-buffer-copied-locals)))))
-
-
-(defun align-buffer--effective-margin (window)
+(defun align-buffer-effective-margin (window)
   "Return the rows `scroll-margin' actually keeps clear in WINDOW."
   (let ((height (window-body-height window)))
     (min (buffer-local-value 'scroll-margin (window-buffer window))
          (max 0 (truncate (* maximum-scroll-margin height))))))
-
-
-;;; Sections
-
-(defun align-buffer-derive-sections (rows)
-  "Return a vector of (FIRST . LAST) runs of adjacent ROWS sharing a tag.
-ROWS may be a vector or a list, as a plan's rows may be."
-  (let ((rows (if (vectorp rows) rows (vconcat rows)))
-        (sections nil)
-        (first nil)
-        (tag nil)
-        (count (length rows)))
-    (dotimes (row-index count)
-      (let ((current (align-buffer-row-tag (aref rows row-index))))
-        (cond
-         ((and first (eq current tag)))
-         (t
-          (when first (push (cons first (1- row-index)) sections))
-          (setq first (and current row-index))
-          (setq tag current)))))
-    (when first (push (cons first (1- count)) sections))
-    (vconcat (nreverse sections))))
 
 (provide 'align-buffer-core)
 

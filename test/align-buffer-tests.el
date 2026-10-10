@@ -2,1162 +2,521 @@
 
 ;;; Commentary:
 
-;; The plan, the maps and the rendering, exercised with hand-written plans and no
-;; generator.
+;; Run with:
+;;
+;;   emacs -Q --batch -L . -l test/align-buffer-tests.el \
+;;         -f ert-run-tests-batch-and-exit
+;;
+;; Batch Emacs never redisplays, so nothing here exercises the scroll hooks or
+;; the paint.  What it does cover is the correspondence, the row arithmetic the
+;; placement rests on, and where a placement puts a window given a viewport set
+;; by hand.  The hooks are the integration harness's job.
 
 ;;; Code:
 
 (require 'ert)
 (require 'align-buffer)
 
-(defun align-buffer-tests--source (name text &optional mode)
-  "Return a buffer called NAME holding TEXT, under MODE."
+(defun align-buffer-tests--buffer (name count)
+  "Return a fresh buffer called NAME holding COUNT numbered lines."
   (let ((buffer (generate-new-buffer name)))
     (with-current-buffer buffer
-      (insert text)
-      (when mode (delay-mode-hooks (funcall mode)))
+      (dotimes (index count) (insert (format "line %03d\n" (1+ index))))
+      (setq-local truncate-lines t)
+      (set-buffer-modified-p nil)
       (goto-char (point-min)))
     buffer))
 
-(defun align-buffer-tests--line-cell (source line &optional face)
-  (align-buffer-cell-create :kind 'line :source source :line line :face face))
+(defun align-buffer-tests--session (pairs &optional left-count right-count)
+  "Return a session over two fresh buffers related by PAIRS."
+  (let ((left (align-buffer-tests--buffer "align-left"
+                                          (or left-count 200)))
+        (right (align-buffer-tests--buffer "align-right"
+                                           (or right-count 200))))
+    (delete-other-windows)
+    (align-buffer-show left right pairs)))
 
-(defun align-buffer-tests--blank-cell (&optional face)
-  (align-buffer-cell-create :kind 'blank :face face))
-
-(defun align-buffer-tests--text-cell (text)
-  (align-buffer-cell-create :kind 'text :text text))
-
-(defmacro align-buffer-tests--with-plan (plan-var &rest body)
-  "Bind PLAN-VAR to a small two-source plan and run BODY."
+(defmacro align-buffer-tests--with-session (pairs &rest body)
+  "Run BODY with `session' bound to a session over PAIRS, then tear it down."
   (declare (indent 1))
-  `(let* ((old (align-buffer-tests--source " *old*" "alpha\nbeta\ndelta\n"))
-          (new (align-buffer-tests--source " *new*" "alpha\ngamma\nbeta\ndelta\n"))
-          (,plan-var
-           (align-buffer-plan-create
-            :left-name " *test left*"
-            :right-name " *test right*"
-            :rows
-            (vector
-             (align-buffer-row-create
-              :left (align-buffer-tests--line-cell old 1)
-              :right (align-buffer-tests--line-cell new 1))
-             (align-buffer-row-create
-              :left (align-buffer-tests--blank-cell 'shadow)
-              :right (align-buffer-tests--line-cell new 2 'success)
-              :tag 'added)
-             (align-buffer-row-create
-              :left (align-buffer-tests--line-cell old 2)
-              :right (align-buffer-tests--line-cell new 3))
-             (align-buffer-row-create
-              :left (align-buffer-tests--line-cell old 3)
-              :right (align-buffer-tests--line-cell new 4))))))
-     (unwind-protect (progn ,@body)
-       (kill-buffer old)
-       (kill-buffer new))))
+  `(let ((session (align-buffer-tests--session ,pairs)))
+     (unwind-protect
+         (progn ,@body)
+       (let ((buffers (list (align-buffer-session-left-buffer session)
+                            (align-buffer-session-right-buffer session))))
+         (align-buffer-quit session)
+         (dolist (buffer buffers)
+           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
-(defun align-buffer-tests--gutter-overlays ()
-  "Return this pane's gutter overlays, earliest first."
-  (seq-filter (lambda (overlay) (overlay-get overlay 'align-buffer-gutter))
-              (sort (overlays-in (point-min) (point-max))
-                    (lambda (one other)
-                      (< (overlay-start one) (overlay-start other))))))
+(defun align-buffer-tests--last-line (buffer)
+  "Return the number of BUFFER's last line."
+  (with-current-buffer buffer
+    (line-number-at-pos (point-max) t)))
 
-(defun align-buffer-tests--gutter-numbers (session side)
-  "Return the number each of SESSION's rows shows in SIDE's gutter, or nil."
-  (with-current-buffer (align-buffer-buffer session side)
-    (mapcar (lambda (overlay)
-              (let* ((strip (overlay-get overlay 'before-string))
-                     (shown (and strip (cadr (get-text-property 0 'display strip)))))
-                (and shown
-                     (not (string-empty-p (string-trim shown)))
-                     (string-trim shown))))
-            (align-buffer-tests--gutter-overlays))))
+(defun align-buffer-tests--window (session side)
+  "Return the window showing SESSION's SIDE."
+  (get-buffer-window (align-buffer-buffer session side)))
 
-(ert-deftest align-buffer-test-line-starts ()
-  "Every line is indexed, the empty one after a final newline included."
-  (let ((with-newline (align-buffer-tests--source " *starts*" "one\ntwo\n"))
-        (without (align-buffer-tests--source " *starts bare*" "one\ntwo")))
+(defun align-buffer-tests--start-line (session side)
+  "Return the line SESSION's SIDE window begins at."
+  (let ((window (align-buffer-tests--window session side)))
+    (align-buffer-line-at (window-buffer window) (window-start window))))
+
+(defun align-buffer-tests--row-of (session side line)
+  "Return the screen row LINE sits on in SESSION's SIDE window."
+  (let ((window (align-buffer-tests--window session side)))
+    (align-buffer--rows-from-start
+     window (align-buffer-line-position (window-buffer window) line))))
+
+(defun align-buffer-tests--view (session side line &optional point-line)
+  "Put SESSION's SIDE window at LINE, with point on POINT-LINE."
+  (let* ((window (align-buffer-tests--window session side))
+         (buffer (window-buffer window)))
+    (select-window window)
+    (set-window-start window (align-buffer-line-position buffer line))
+    (align-buffer--set-point
+     window (align-buffer-line-position buffer (or point-line line)))))
+
+
+;;; Building the correspondence
+
+(ert-deftest align-buffer-test-index-is-sorted-by-its-own-line ()
+  "An index orders pairs by the line of the side it answers for."
+  (let ((index (align-buffer-build-index '((9 . 1) (2 . 5) (7 . 3)) 'left)))
+    (should (equal (append index nil) '((2 . 5) (7 . 3) (9 . 1))))))
+
+(ert-deftest align-buffer-test-the-right-index-swaps-the-pairs ()
+  "Asked from the right, a pair reads as (RIGHT-LINE . LEFT-LINE)."
+  (let ((index (align-buffer-build-index '((9 . 1) (2 . 5) (7 . 3)) 'right)))
+    (should (equal (append index nil) '((1 . 9) (3 . 7) (5 . 2))))))
+
+(ert-deftest align-buffer-test-a-vector-of-pairs-is-accepted ()
+  "Pairs may arrive as a vector as readily as a list."
+  (let ((index (align-buffer-build-index [(3 . 4) (1 . 2)] 'left)))
+    (should (equal (append index nil) '((1 . 2) (3 . 4))))))
+
+(ert-deftest align-buffer-test-a-pair-must-be-two-line-numbers ()
+  "Anything that is not a cons of two positive integers is refused."
+  (should-error (align-buffer-check-pairs '((1 . 2) (3))))
+  (should-error (align-buffer-check-pairs '((0 . 2))))
+  (should-error (align-buffer-check-pairs '((1 . "2"))))
+  (should-not (align-buffer-check-pairs '((1 . 2) (3 . 4)))))
+
+
+;;; Asking the correspondence
+
+(ert-deftest align-buffer-test-the-anchor-is-the-pair-at-or-below ()
+  "A line between two pairs is governed by the one above it."
+  (align-buffer-tests--with-session '((10 . 10) (20 . 40) (30 . 50))
+				    (should (equal (align-buffer-anchor session 'left 25) '(20 . 40)))
+				    (should (equal (align-buffer-anchor session 'left 20) '(20 . 40)))
+				    (should (equal (align-buffer-anchor session 'left 999) '(30 . 50)))))
+
+(ert-deftest align-buffer-test-a-line-above-every-pair-gets-the-first ()
+  "Below the first pair there is nothing to govern a line, so the first stands in.
+Its own line reads as above the asked line, which is how a caller tells."
+  (align-buffer-tests--with-session '((10 . 10) (20 . 40))
+				    (let ((anchor (align-buffer-anchor session 'left 3)))
+				      (should (equal anchor '(10 . 10)))
+				      (should (> (car anchor) 3)))
+				    (should-not (align-buffer-corresponding-line session 'left 3))))
+
+(ert-deftest align-buffer-test-a-correspondence-may-be-empty ()
+  "With no pairs at all there is no anchor and nothing corresponds."
+  (align-buffer-tests--with-session nil
+				    (should-not (align-buffer-anchor session 'left 5))
+				    (should-not (align-buffer-corresponding-line session 'left 5))))
+
+(ert-deftest align-buffer-test-the-last-pair-given-for-a-line-decides ()
+  "Where several pairs share a line, the one given last governs it."
+  (align-buffer-tests--with-session '((10 . 10) (10 . 77))
+				    (should (equal (align-buffer-corresponding-line session 'left 10) 77))))
+
+(ert-deftest align-buffer-test-many-lines-may-share-a-counterpart ()
+  "A line of one side answering for several of the other is a correspondence
+like any other, asked in either direction."
+  (align-buffer-tests--with-session '((10 . 5) (11 . 5) (12 . 5))
+				    (should (equal (align-buffer-corresponding-line session 'left 11) 5))
+				    (should (equal (align-buffer-corresponding-line session 'right 5) 12))))
+
+(ert-deftest align-buffer-test-a-correspondence-need-not-be-monotonic ()
+  "A moved block pairs with lines far away, and both sides still answer."
+  (align-buffer-tests--with-session '((10 . 90) (11 . 91) (50 . 20))
+				    (should (equal (align-buffer-corresponding-line session 'left 10) 90))
+				    (should (equal (align-buffer-corresponding-line session 'left 50) 20))
+				    (should (equal (align-buffer-corresponding-line session 'right 90) 10))
+				    (should (equal (align-buffer-corresponding-line session 'right 20) 50))))
+
+(ert-deftest align-buffer-test-replacing-the-correspondence-changes-the-answers ()
+  "A session's pairs can be replaced without building it again."
+  (align-buffer-tests--with-session '((10 . 10))
+				    (should (equal (align-buffer-corresponding-line session 'left 10) 10))
+				    (align-buffer-set-pairs session '((10 . 60)))
+				    (should (equal (align-buffer-corresponding-line session 'left 10) 60))))
+
+
+;;; Lines and positions
+
+(ert-deftest align-buffer-test-a-line-past-the-end-gives-the-last ()
+  "A correspondence left stale by an edit still places a window somewhere."
+  (let ((buffer (align-buffer-tests--buffer "align-short" 5)))
     (unwind-protect
-        (progn
-          (should (equal (align-buffer--line-starts with-newline) [1 5 9]))
-          (should (equal (align-buffer--line-starts without) [1 5])))
-      (kill-buffer with-newline)
-      (kill-buffer without))))
-
-(ert-deftest align-buffer-test-copied-properties-are-filtered ()
-  "We keep the face and drop everything else, `category' included."
-  (let ((text (propertize "hello" 'face 'bold 'category 'some-category
-                          'keymap (make-sparse-keymap))))
-    (align-buffer--filter-properties text)
-    (should (equal (get-text-property 0 'face text) 'bold))
-    (should-not (get-text-property 0 'category text))
-    (should-not (get-text-property 0 'keymap text))))
-
-(ert-deftest align-buffer-test-pane-text ()
-  "Each pane holds one real line per row, padding included."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (should (equal (with-current-buffer (align-buffer-buffer session 'left)
-                             (buffer-substring-no-properties (point-min) (point-max)))
-                           "alpha\n\nbeta\ndelta\n"))
-            (should (equal (with-current-buffer (align-buffer-buffer session 'right)
-                             (buffer-substring-no-properties (point-min) (point-max)))
-                           "alpha\ngamma\nbeta\ndelta\n")))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-row-is-the-pane-line ()
-  "A row index is its pane line number minus one, both ways."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (dolist (side '(left right))
-            (with-current-buffer (align-buffer-buffer session side)
-              (dotimes (row (align-buffer-row-count session))
-                (let ((position (align-buffer-row-beginning-position session row side)))
-                  (should (= (align-buffer-row-at-point position) row))
-                  (goto-char position)
-                  (should (= (line-number-at-pos) (1+ row)))))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-source-rows-are-one-to-many ()
-  "A source line maps to every row showing it."
-  (align-buffer-tests--with-plan plan
-    (let* ((session (align-buffer-show plan))
-           (new (align-buffer-cell-source
-                 (align-buffer-cell session 0 'right))))
-      (unwind-protect
-          (progn
-            (should (equal (align-buffer-source-rows session new 2)
-                           '((1 . right))))
-            (should-not (align-buffer-source-rows session new 99)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-repeated-source-line ()
-  "The same source line shown twice maps to both rows."
-  (let* ((source (align-buffer-tests--source " *twice*" "only\n"))
-         (cell (align-buffer-tests--line-cell source 1))
-         (plan (align-buffer-plan-create
-                :left-name " *twice left*"
-                :right-name " *twice right*"
-                :rows (vector (align-buffer-row-create :left cell :right cell)
-                              (align-buffer-row-create :left cell :right cell)))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (should (equal (align-buffer-source-rows session source 1)
-                             '((0 . left) (0 . right) (1 . left) (1 . right))))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-sections-from-tags ()
-  "Adjacent rows sharing a tag are one section; untagged rows are in none."
-  (let ((rows (vector (align-buffer-row-create :tag nil)
-                      (align-buffer-row-create :tag 'change)
-                      (align-buffer-row-create :tag 'change)
-                      (align-buffer-row-create :tag nil)
-                      (align-buffer-row-create :tag 'change))))
-    (should (equal (align-buffer-derive-sections rows) [(1 . 2) (4 . 4)]))))
-
-(ert-deftest align-buffer-test-visit-source-skips-padding ()
-  "A padding row resolves to the nearest row above that has a source."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (should (= (align-buffer--nearest-source-row session 1 'left) 0))
-            (should (= (align-buffer--nearest-source-row session 1 'right) 1)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-faces-come-from-the-source ()
-  "A fontified source line brings its faces into the pane."
-  (let* ((source (align-buffer-tests--source
-                  " *faced*" ";; a comment\n(defun f ())\n" #'emacs-lisp-mode))
-         (plan (align-buffer-plan-create
-                :left-name " *faced left*"
-                :right-name " *faced right*"
-                :rows (vector (align-buffer-row-create
-                               :left (align-buffer-tests--line-cell source 1)
-                               :right (align-buffer-tests--text-cell "plain"))))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'left)
-                (should (get-char-property (point-min) 'face))
-                (should-not (bound-and-true-p font-lock-mode)))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-parameters-from-buffer ()
-  "Parameters carry values, not a buffer to read later."
-  (let ((buffer (align-buffer-tests--source " *parameters*" "text\n")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (setq-local tab-width 3)
-          (let ((parameters (align-buffer-parameters-from-buffer buffer)))
-            (should (syntax-table-p (plist-get parameters :syntax-table)))
-            (should (equal (alist-get 'tab-width (plist-get parameters :locals))
-                           3))))
+        (should (equal (align-buffer-line-position buffer 500)
+                       (with-current-buffer buffer (point-max))))
       (kill-buffer buffer))))
 
-(ert-deftest align-buffer-test-quit-leaves-sources-alone ()
-  "Tearing down kills the panes and nothing else."
-  (align-buffer-tests--with-plan plan
-    (let* ((session (align-buffer-show plan))
-           (left (align-buffer-buffer session 'left))
-           (source (align-buffer-cell-source (align-buffer-cell session 0 'left))))
-      (align-buffer-quit session)
-      (should-not (buffer-live-p left))
-      (should (buffer-live-p source))
-      (should-not (align-buffer-sessions)))))
-
-(ert-deftest align-buffer-test-killing-a-pane-tears-down ()
-  "Killing one pane out of band takes the session with it."
-  (align-buffer-tests--with-plan plan
-    (let* ((session (align-buffer-show plan))
-           (right (align-buffer-buffer session 'right)))
-      (kill-buffer (align-buffer-buffer session 'left))
-      (should-not (buffer-live-p right))
-      (should-not (align-buffer-sessions)))))
-
-(ert-deftest align-buffer-test-rebuild-keeps-the-maps ()
-  "Rebuilding from a new plan re-derives the positions."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (let* ((rows (align-buffer-plan-rows plan))
-                 (shorter (align-buffer-plan-create
-                           :left-name (align-buffer-plan-left-name plan)
-                           :right-name (align-buffer-plan-right-name plan)
-                           :rows (vector (aref rows 0) (aref rows 2)))))
-            (align-buffer-rebuild session shorter)
-            (should (= (align-buffer-row-count session) 2))
-            (should (equal (with-current-buffer (align-buffer-buffer session 'left)
-                             (buffer-substring-no-properties (point-min) (point-max)))
-                           "alpha\nbeta\n")))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-next-section-takes-the-earliest-start ()
-  "Forwards is the earliest start after the row, whatever the sections overlap."
-  (let ((sections [(20 . 60) (25 . 30) (40 . 45)]))
-    (should (= (align-buffer--section-after 0 sections) 0))
-    (should (= (align-buffer--section-after 20 sections) 1))
-    (should (= (align-buffer--section-after 25 sections) 2))
-    (should-not (align-buffer--section-after 50 sections))))
-
-(ert-deftest align-buffer-test-previous-section-takes-the-latest-start ()
-  (let ((sections [(20 . 60) (25 . 30) (40 . 45)]))
-    (should (= (align-buffer--section-before 50 sections) 2))
-    (should (= (align-buffer--section-before 40 sections) 1))
-    (should (= (align-buffer--section-before 25 sections) 0))
-    (should-not (align-buffer--section-before 20 sections))))
-
-(ert-deftest align-buffer-test-sections-sharing-a-start-are-visited-once ()
-  "Where a block and a hunk begin together, one keypress is one move.
-The first of them in the vector is the one visited, so a nested region does not
-cost a keypress that appears to do nothing."
-  (let ((sections [(20 . 60) (20 . 25)]))
-    (should (= (align-buffer--section-after 0 sections) 0))
-    (should-not (align-buffer--section-after 20 sections))))
-
-(ert-deftest align-buffer-test-section-navigation-always-moves ()
-  "Repeated moves never stand still, in a plan whose sections nest."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 80) "\n"))
-         (old (align-buffer-tests--source " *nested old*" text))
-         (new (align-buffer-tests--source " *nested new*" text))
-         (plan (align-buffer-tests--big-plan old new 80)))
-    (setf (align-buffer-plan-sections plan) '((20 . 60) (25 . 30) (40 . 45)))
+(ert-deftest align-buffer-test-narrowing-does-not-move-a-line ()
+  "Line numbers are absolute, so a reader's narrowing does not shift them."
+  (let ((buffer (align-buffer-tests--buffer "align-narrow" 50)))
     (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (with-current-buffer (window-buffer (selected-window))
-                (goto-char (point-min))
-                (let ((visited nil))
-                  (dotimes (_ 3)
-                    (align-buffer-next-section)
-                    (push (align-buffer-row-at-point) visited))
-                  (should (equal (nreverse visited) '(20 25 40)))
-                  (should-error (align-buffer-next-section) :type 'user-error)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+        (let ((wide (align-buffer-line-position buffer 30)))
+          (with-current-buffer buffer
+            (narrow-to-region (align-buffer-line-position buffer 20)
+                              (align-buffer-line-position buffer 40)))
+          (should (equal (align-buffer-line-position buffer 30) wide))
+          (should (equal (align-buffer-line-at buffer wide) 30)))
+      (kill-buffer buffer))))
 
-(defmacro align-buffer-tests--with-boundary-handler (handled &rest body)
-  "Run BODY with a boundary handler returning HANDLED, and `calls' bound.
-`calls' collects the (SESSION . REMAINING) the handler was given, in order."
-  (declare (indent 1))
-  `(let* ((calls nil)
-          (align-buffer-section-boundary-functions
-           (list (lambda (boundary-session remaining)
-                   (setq calls (append calls
-                                       (list (cons boundary-session remaining))))
-                   ,handled))))
-     ,@body))
 
-(ert-deftest align-buffer-test-a-boundary-handler-stands-in-for-the-error ()
-  "A handler taking the boundary leaves the command quiet and point where it is."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (align-buffer-tests--with-boundary-handler t
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (goto-char (point-min))
-              (align-buffer-next-section)
-              (should (= (align-buffer-row-at-point) 1))
-              (align-buffer-next-section)
-              (should (= (align-buffer-row-at-point) 1))
-              (should (equal calls (list (cons session 1))))))
-        (align-buffer-quit session)))))
+;;; Row arithmetic
 
-(ert-deftest align-buffer-test-a-boundary-handler-may-decline ()
-  "A handler returning nil has not taken the boundary, so the error stands."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (align-buffer-tests--with-boundary-handler nil
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (goto-char (point-min))
-              (align-buffer-next-section)
-              (should-error (align-buffer-next-section) :type 'user-error)
-              (should (equal calls (list (cons session 1))))))
-        (align-buffer-quit session)))))
+(ert-deftest align-buffer-test-rows-are-counted-from-the-window-start ()
+  "The row of a position is how many screen lines below the start it sits."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (align-buffer-tests--view session 'left 50)
+				    (should (equal (align-buffer-tests--row-of session 'left 50) 0))
+				    (should (equal (align-buffer-tests--row-of session 'left 57) 7))))
 
-(ert-deftest align-buffer-test-a-handled-boundary-ends-the-move ()
-  "The moves left over are not spent once a handler has taken the boundary.
-It may have moved us somewhere else, where they mean nothing."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (align-buffer-tests--with-boundary-handler t
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (goto-char (point-min))
-              (align-buffer-next-section 3)
-              (should (= (align-buffer-row-at-point) 1))
-              (should (equal calls (list (cons session 2))))))
-        (align-buffer-quit session)))))
+(ert-deftest align-buffer-test-a-row-above-the-start-is-not-a-row ()
+  "Nothing above the window has a row in it, and the count says so."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (align-buffer-tests--view session 'left 50)
+				    (should-not (align-buffer-tests--row-of session 'left 40))))
 
-(ert-deftest align-buffer-test-a-backward-boundary-counts-down ()
-  "Going backwards the moves left are negative, so a handler knows which way."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (align-buffer-tests--with-boundary-handler t
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (goto-char (point-min))
-              (align-buffer-next-section)
-              (align-buffer-previous-section)
-              (should (equal calls (list (cons session -1))))))
-        (align-buffer-quit session)))))
+(ert-deftest align-buffer-test-a-row-below-the-window-is-not-a-row ()
+  "A position further down than the window is tall is refused, which is what
+keeps the count from walking a whole buffer."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (align-buffer-tests--view session 'left 1)
+				    (should-not (align-buffer-tests--row-of session 'left 180))))
 
-(ert-deftest align-buffer-test-a-plan-with-no-sections-reaches-the-hook ()
-  "A plan calling nothing interesting is a boundary like running out of them."
-  (let* ((old (align-buffer-tests--source " *sectionless old*" "one\ntwo\n"))
-         (new (align-buffer-tests--source " *sectionless new*" "one\ntwo\n"))
-         (plan (align-buffer-tests--big-plan old new 2)))
+(ert-deftest align-buffer-test-a-row-is-counted-the-way-it-is-walked ()
+  "A truncated line wider than the window takes one row, and the row of a
+position below it is one a walk of that many rows reaches."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window)))
+      (with-current-buffer buffer
+        (setq-local truncate-lines t)
+        (save-excursion
+          (goto-char (align-buffer-line-position buffer 55))
+          (end-of-line)
+          (insert (make-string (* 3 (window-body-width window)) ?x))))
+      (align-buffer-tests--view session 'left 50)
+      (let* ((position (align-buffer-line-position buffer 60))
+             (row (align-buffer--rows-from-start window position)))
+        (should (equal row 10))
+        (should (equal (car (align-buffer--position-rows-below
+                             window (window-start window) row))
+                       position))))))
+
+(ert-deftest align-buffer-test-a-settled-viewport-needs-no-correction ()
+  "Point well inside the window is a window redisplay will leave alone."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (let ((window (align-buffer-tests--window session 'left)))
+				      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
+				      (align-buffer-tests--view session 'left 50 60)
+				      (should (equal (align-buffer--settling-correction window) 0)))))
+
+(ert-deftest align-buffer-test-a-viewport-corrects-for-a-point-below-it ()
+  "Point past the bottom margin is one redisplay scrolls forward to clear."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (let* ((window (align-buffer-tests--window session 'left))
+					   (height (window-body-height window)))
+				      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
+				      (align-buffer-tests--view session 'left 50 (+ 50 height -1))
+				      (should (equal (align-buffer--settling-correction window) 5)))))
+
+(ert-deftest align-buffer-test-a-viewport-corrects-for-a-point-above-it ()
+  "Point inside the top margin is one redisplay scrolls back to clear."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (let ((window (align-buffer-tests--window session 'left)))
+				      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
+				      (align-buffer-tests--view session 'left 50 52)
+				      (should (equal (align-buffer--settling-correction window) -3)))))
+
+(ert-deftest align-buffer-test-the-first-line-has-nothing-to-scroll-back-into ()
+  "At the top of the buffer the margin asks for no correction, however close
+to the top point sits."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (let ((window (align-buffer-tests--window session 'left)))
+				      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
+				      (align-buffer-tests--view session 'left 1 2)
+				      (should (equal (align-buffer--settling-correction window) 0)))))
+
+(ert-deftest align-buffer-test-the-last-line-has-nothing-to-scroll-into ()
+  "At the end of the buffer the margin asks for no correction, however close
+to the bottom point sits."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (last (align-buffer-tests--last-line buffer))
+           (height (window-body-height window)))
+      (with-current-buffer buffer (setq-local scroll-margin 5))
+      ;; The last line on the window's bottom row, so the margin is breached
+      ;; and there is nothing below to clear it with.
+      (align-buffer-tests--view session 'left (- last height -1) last)
+      (should (equal (align-buffer--settling-correction window) 0)))))
+
+(ert-deftest align-buffer-test-a-correction-back-stops-at-the-first-line ()
+  "A window two rows into the buffer can only be scrolled back those two."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let ((window (align-buffer-tests--window session 'left)))
+      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
+      (align-buffer-tests--view session 'left 3 4)
+      (should (equal (align-buffer--settling-correction window) -2)))))
+
+(ert-deftest align-buffer-test-a-point-row-inside-the-band-is-left-alone ()
+  (should (equal (align-buffer--clamp-point-row 10 nil 30 5) 10)))
+
+(ert-deftest align-buffer-test-a-point-row-clears-the-top-margin ()
+  (should (equal (align-buffer--clamp-point-row 2 nil 30 5) 5)))
+
+(ert-deftest align-buffer-test-a-point-row-clears-the-bottom-margin ()
+  (should (equal (align-buffer--clamp-point-row 29 nil 30 5) 24)))
+
+(ert-deftest align-buffer-test-a-point-row-at-the-top-of-the-buffer-keeps-its-row ()
+  "No floor when the window starts at the first line, so a viewport at the top
+does not drag point down past its margin."
+  (should (equal (align-buffer--clamp-point-row 0 t 30 5) 0)))
+
+(ert-deftest align-buffer-test-a-point-row-never-leaves-the-window ()
+  "A window shorter than twice its margin still gets a row inside itself."
+  (should (<= 0 (align-buffer--clamp-point-row 10 nil 4 5) 3)))
+
+(ert-deftest align-buffer-test-a-start-with-room-below-it-is-kept ()
+  "Away from the end of the buffer the wanted start is the one used."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (start (align-buffer-line-position buffer 50)))
+      (should (equal (align-buffer--start-leaving-room window start 5) start)))))
+
+(ert-deftest align-buffer-test-a-start-at-the-end-moves-back-for-the-point-row ()
+  "The end of the buffer leaves too few rows, so the start gives up its own."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (last (align-buffer-tests--last-line buffer))
+           (start (align-buffer-line-position buffer last))
+           (moved (align-buffer--start-leaving-room window start 5)))
+      (should (< moved start)))))
+
+(ert-deftest align-buffer-test-a-start-moved-back-leaves-the-point-row-reachable ()
+  "Wherever the start was asked for, the point row is on offer afterwards."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (last (align-buffer-tests--last-line buffer)))
+      (dolist (line (list 1 50 (- last 3) (1- last) last))
+        (let* ((start (align-buffer--start-leaving-room
+                       window (align-buffer-line-position buffer line) 5))
+               (reached (cdr (align-buffer--position-rows-below window start 5))))
+          (should (equal reached 5)))))))
+
+
+;;; Placing the other window
+
+(ert-deftest align-buffer-test-the-governing-pair-lands-level ()
+  "The pair governing the line point is on sits on one row in both windows."
+  (align-buffer-tests--with-session '((10 . 10) (40 . 120))
+				    (align-buffer-tests--view session 'left 30 45)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (should (equal (align-buffer-tests--row-of session 'left 40)
+						   (align-buffer-tests--row-of session 'right 120)))))
+
+(ert-deftest align-buffer-test-a-moved-block-makes-the-other-window-jump ()
+  "A non-monotonic pair is followed like any other, however far it reaches."
+  (align-buffer-tests--with-session '((10 . 10) (50 . 150))
+				    (align-buffer-tests--view session 'left 45 55)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (should (equal (align-buffer-tests--row-of session 'left 50)
+						   (align-buffer-tests--row-of session 'right 150)))))
+
+(ert-deftest align-buffer-test-an-unpaired-run-holds-the-other-window ()
+  "Reading a block with no counterpart leaves the other window at the last
+line that had one, rather than scrolling it past content that answers nothing."
+  (align-buffer-tests--with-session '((10 . 10) (90 . 11))
+				    ;; Point deep inside the unpaired run, with its governing pair scrolled
+				    ;; off the top.
+				    (align-buffer-tests--view session 'left 60 70)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (should (equal (align-buffer-tests--start-line session 'right) 10))))
+
+(ert-deftest align-buffer-test-the-other-window-stops-rather-than-drifting ()
+  "Scrolling further through an unpaired run does not move the other window on."
+  (align-buffer-tests--with-session '((10 . 10) (90 . 11))
+				    (align-buffer-tests--view session 'left 40 50)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (let ((first (align-buffer-tests--start-line session 'right)))
+				      (align-buffer-tests--view session 'left 70 80)
+				      (align-buffer-sync (align-buffer-tests--window session 'left))
+				      (should (equal (align-buffer-tests--start-line session 'right) first)))))
+
+(ert-deftest align-buffer-test-either-side-can-lead ()
+  "The window the reader is in leads, whichever of the two that is."
+  (align-buffer-tests--with-session '((10 . 10) (60 . 130))
+				    (align-buffer-tests--view session 'right 120 135)
+				    (align-buffer-sync (align-buffer-tests--window session 'right))
+				    (should (equal (align-buffer-tests--row-of session 'right 130)
+						   (align-buffer-tests--row-of session 'left 60)))))
+
+(ert-deftest align-buffer-test-a-window-we-placed-is-not-a-scroll-to-follow ()
+  "Rule 4: the follower sits where we put it, so its own hook declines to lead."
+  (align-buffer-tests--with-session '((10 . 10) (40 . 120))
+				    (align-buffer-tests--view session 'left 30 45)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (should (align-buffer--own-scroll-p
+					     (align-buffer-tests--window session 'right)))))
+
+(ert-deftest align-buffer-test-a-reader-moving-the-follower-is-not-our-scroll ()
+  "A follower the reader then scrolls stops reading as ours."
+  (align-buffer-tests--with-session '((10 . 10) (40 . 120))
+				    (align-buffer-tests--view session 'left 30 45)
+				    (align-buffer-sync (align-buffer-tests--window session 'left))
+				    (let ((follower (align-buffer-tests--window session 'right)))
+				      (set-window-start follower (align-buffer-line-position
+								  (window-buffer follower) 7))
+				      (should-not (align-buffer--own-scroll-p follower)))))
+
+(ert-deftest align-buffer-test-nothing-corresponding-leaves-the-other-alone ()
+  "With no pairs there is nothing to be level with, so no window is moved."
+  (align-buffer-tests--with-session nil
+				    (align-buffer-tests--view session 'right 80)
+				    (align-buffer-tests--view session 'left 30 40)
+				    (should-not (align-buffer-sync (align-buffer-tests--window session 'left)))
+				    (should (equal (align-buffer-tests--start-line session 'right) 80))))
+
+
+;;; The session
+
+(ert-deftest align-buffer-test-both-buffers-take-part ()
+  "Each buffer knows its session and which side of it it is."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (dolist (side '(left right))
+				      (with-current-buffer (align-buffer-buffer session side)
+					(should align-buffer-mode)
+					(should (eq (align-buffer-current-session) session))
+					(should (eq (align-buffer-side) side))))))
+
+(ert-deftest align-buffer-test-a-session-is-registered-while-it-lives ()
+  (align-buffer-tests--with-session '((1 . 1))
+				    (should (memq session (align-buffer-sessions)))))
+
+(ert-deftest align-buffer-test-a-buffer-belongs-to-one-session-at-a-time ()
+  "Scrolling a buffer to two others at once has no meaning, so it is refused."
+  (align-buffer-tests--with-session '((1 . 1))
+				    (let ((other (align-buffer-tests--buffer "align-other" 20)))
+				      (unwind-protect
+					  (should-error
+					   (align-buffer-show (align-buffer-session-left-buffer session)
+							      other '((1 . 1)))
+					   :type 'user-error)
+					(kill-buffer other)))))
+
+(ert-deftest align-buffer-test-a-buffer-is-not-shown-against-itself ()
+  (let ((buffer (align-buffer-tests--buffer "align-alone" 20)))
     (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (align-buffer-tests--with-boundary-handler t
-                (with-current-buffer (align-buffer-buffer session 'right)
-                  (should (equal (align-buffer-session-sections session) []))
-                  (goto-char (point-min))
-                  (align-buffer-next-section)
-                  (should (equal calls (list (cons session 1))))))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+        (should-error (align-buffer-show buffer buffer '((1 . 1))))
+      (kill-buffer buffer))))
 
-(ert-deftest align-buffer-test-a-boundary-handler-for-one-session-only ()
-  "The hook made buffer-local in a pane is that session's own handler."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (let ((taken nil))
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (add-hook 'align-buffer-section-boundary-functions
-                        (lambda (_session _remaining) (setq taken t))
-                        nil t)
-              (goto-char (point-min))
-              (align-buffer-next-section)
-              (align-buffer-next-section)
-              (should taken)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-a-settled-viewport-is-left-alone ()
-  "A window whose point clears its margins is already where it will stay."
-  (should (= (align-buffer--settled-top-row 20 51 5 40) 20)))
-
-(ert-deftest align-buffer-test-a-viewport-scrolls-to-clear-its-point ()
-  "Point below the last safe row scrolls the window down by the difference.
-The mouse wheel leaves point exactly there, and redisplay corrects it a moment
-after we have synced, which is how the two panes ended up one row apart."
-  (should (= (align-buffer--settled-top-row 17 51 5 63) 18))
-  (should (= (align-buffer--settled-top-row 17 51 5 70) 25)))
-
-(ert-deftest align-buffer-test-a-viewport-scrolls-back-for-a-point-above-it ()
-  "A point above the first safe row pulls the top back far enough to clear it.
-Point on row 10 with a 5-row margin needs a top of 5, not of 15: the margin is
-counted from the top down to the point, not taken off the old top."
-  (should (= (align-buffer--settled-top-row 20 51 5 10) 5))
-  (should (= (align-buffer--settled-top-row 3 51 5 0) 0)))
-
-(ert-deftest align-buffer-test-point-row-inside-the-window-is-left-alone ()
-  "A row that already clears the margin is not moved."
-  (should (= (align-buffer--clamp-point-row 30 20 54 5 79) 30)))
-
-(ert-deftest align-buffer-test-point-row-clears-the-top-margin ()
-  "A row inside the top margin moves down to the first safe row."
-  (should (= (align-buffer--clamp-point-row 22 20 54 5 79) 25)))
-
-(ert-deftest align-buffer-test-point-row-clears-the-bottom-margin ()
-  "A row inside the bottom margin moves up to the last safe row."
-  (should (= (align-buffer--clamp-point-row 73 20 54 5 79) 68)))
-
-(ert-deftest align-buffer-test-point-row-above-a-shorter-follower ()
-  "The leader's row can sit above a shorter follower, so it comes down to it.
-With unequal heights the panes align on their centres, so a follower half the
-leader's height shows none of the leader's top rows."
-  (should (= (align-buffer--clamp-point-row 6 17 20 5 79) 22)))
-
-(ert-deftest align-buffer-test-point-row-below-a-shorter-follower ()
-  "A row below a shorter follower comes up to its last safe row.
-The 20-row window at 17 shows rows 17 to 36, so a 5-row bottom margin leaves 31."
-  (should (= (align-buffer--clamp-point-row 60 17 20 5 79) 31)))
-
-(ert-deftest align-buffer-test-point-row-never-leaves-the-plan ()
-  "Clamping stays inside the rows that exist, however small the plan."
-  (should (= (align-buffer--clamp-point-row 3 0 54 5 2) 2))
-  (should (= (align-buffer--clamp-point-row 5 0 54 5 2) 2)))
-
-(ert-deftest align-buffer-test-point-row-at-the-top-of-the-plan ()
-  "A viewport at row zero leaves the point wherever it is.
-The margin exists to stop redisplay scrolling the window back, and there is
-nothing above row zero to scroll into."
-  (should (= (align-buffer--clamp-point-row 0 0 34 5 199) 0))
-  (should (= (align-buffer--clamp-point-row 3 0 34 5 199) 3))
-  (should (= (align-buffer--clamp-point-row 3 1 34 5 199) 6)))
-
-(ert-deftest align-buffer-test-point-row-in-a-window-smaller-than-its-margins ()
-  "A window too short for two margins prefers the top rather than inverting."
-  (should (= (align-buffer--clamp-point-row 40 10 6 5 79) 15)))
-
-(defun align-buffer-tests--big-plan (old new rows)
-  "Return a plan of ROWS rows reading OLD and NEW line by line."
-  (align-buffer-plan-create
-   :left-name " *moving left*"
-   :right-name " *moving right*"
-   :rows (vconcat
-          (cl-loop for line from 1 to rows
-                   collect (align-buffer-row-create
-                            :left (align-buffer-tests--line-cell old line)
-                            :right (align-buffer-tests--line-cell new line))))))
-
-(ert-deftest align-buffer-test-point-keeps-moving ()
-  "Each command moves point one row and nothing puts it back.
-
-Batch never runs `window-scroll-functions', so the hook is driven here the way
-redisplay drives it: placing the follower changes its start, and if that scroll
-is taken for the user's the follower leads from it, a placement of the user's own
-window is queued, and the next command undoes the move.  That is a frozen pane."
-  (let* ((text (mapconcat (lambda (n) (format "line %d" n))
-                          (number-sequence 1 60) "\n"))
-         (old (align-buffer-tests--source " *moving old*" text))
-         (new (align-buffer-tests--source " *moving new*" text)))
+(ert-deftest align-buffer-test-quitting-leaves-both-buffers-alive ()
+  "The buffers are the reader's, so a session ending does not take them with it."
+  (let* ((session (align-buffer-tests--session '((1 . 1))))
+         (left (align-buffer-session-left-buffer session))
+         (right (align-buffer-session-right-buffer session)))
     (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 60))))
-          (unwind-protect
-              (with-current-buffer (window-buffer (selected-window))
-                (let ((follower (get-buffer-window
-                                 (align-buffer-buffer
-                                  session (align-buffer-other-side
-                                           align-buffer--side))))
-                      (rows nil))
-                  (goto-char (align-buffer-row-beginning-position session 20
-                                                        align-buffer--side))
-                  (dotimes (_ 5)
-                    (forward-line 1)
-                    (align-buffer--post-command)
-                    (align-buffer--scroll-hook follower (window-start follower))
-                    (align-buffer--post-command)
-                    (push (align-buffer-row-at-point) rows))
-                  (should (equal (nreverse rows) '(21 22 23 24 25)))))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+        (progn
+          (align-buffer-quit session)
+          (should (buffer-live-p left))
+          (should (buffer-live-p right))
+          (dolist (buffer (list left right))
+            (with-current-buffer buffer
+              (should-not align-buffer-mode)
+              (should-not (align-buffer-current-session))))
+          (should-not (memq session (align-buffer-sessions))))
+      (dolist (buffer (list left right))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest align-buffer-test-a-tiny-window-does-not-lead ()
-  "A one-line window showing a pane never leads a sync.
-Splitting a pane's window leaves the new window showing the pane's buffer for an
-instant, as hydra's hint window does.  Its start is real but its height is not
-the pane's, so the centre computed from it puts the other pane elsewhere."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 60) "\n"))
-         (old (align-buffer-tests--source " *tiny old*" text))
-         (new (align-buffer-tests--source " *tiny new*" text)))
+(ert-deftest align-buffer-test-quitting-gives-back-the-point-it-moved ()
+  "Point goes back where it was in the buffer the reader is not standing in."
+  (let* ((left (align-buffer-tests--buffer "align-left" 200))
+         (right (align-buffer-tests--buffer "align-right" 200))
+         session)
     (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 60))))
-          (unwind-protect
-              (let* ((leader (get-buffer-window (align-buffer-buffer session 'left)))
-                     (follower (get-buffer-window
-                                (align-buffer-buffer session 'right)))
-                     (before (with-current-buffer (window-buffer follower)
-                               (align-buffer-row-at-point
-                                (window-start follower)))))
-                (set-window-start leader (align-buffer-row-beginning-position session 30 'left))
-                (align-buffer--set-point
-                 leader (align-buffer-row-beginning-position session 30 'left))
-                (cl-letf (((symbol-function 'window-body-height)
-                           (lambda (&rest _) 1)))
-                  (align-buffer-sync leader))
-                (should (= (with-current-buffer (window-buffer follower)
-                             (align-buffer-row-at-point (window-start follower)))
-                           before)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+        (progn
+          (with-current-buffer left
+            (goto-char (align-buffer-line-position left 7)))
+          (delete-other-windows)
+          (setq session (align-buffer-show left right '((10 . 10) (80 . 90))))
+          (select-window (get-buffer-window right))
+          (align-buffer-tests--view session 'right 85 95)
+          (align-buffer-sync (get-buffer-window right))
+          (align-buffer-quit session)
+          (should (equal (align-buffer-line-at left (with-current-buffer left
+                                                      (point)))
+                         7)))
+      (dolist (buffer (list left right))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest align-buffer-test-our-own-scroll-does-not-lead ()
-  "A start we set is recognised as ours by everyone who asks, until it moves.
-
-Both the scroll hook and the command hook ask this about the same window in the
-same cycle, so the answer has to be stable rather than consumed by whoever asks
-first.  It stops being ours once the window is somewhere else, which is what
-makes a later scroll back to the same row the user's own."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 40) "\n"))
-         (old (align-buffer-tests--source " *own old*" text))
-         (new (align-buffer-tests--source " *own new*" text)))
+(ert-deftest align-buffer-test-killing-one-buffer-ends-the-session ()
+  "A session cannot outlive a buffer, and the other buffer survives it."
+  (let* ((session (align-buffer-tests--session '((1 . 1))))
+         (left (align-buffer-session-left-buffer session))
+         (right (align-buffer-session-right-buffer session)))
     (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 40))))
-          (unwind-protect
-              (let* ((window (get-buffer-window
-                              (align-buffer-buffer session 'left)))
-                     (start (align-buffer-row-beginning-position session 3 'left)))
-                (set-window-start window start)
-                (align-buffer--note-placed window start (window-point window))
-                (should (align-buffer--own-scroll-p window))
-                (should (align-buffer--own-scroll-p window))
-                (set-window-start window
-                                  (align-buffer-row-beginning-position
-                                   session 9 'left))
-                (should-not (align-buffer--own-scroll-p window))
-                (set-window-start window start)
-                (should-not (align-buffer--own-scroll-p window)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+        (progn
+          (kill-buffer left)
+          (should-not (memq session (align-buffer-sessions)))
+          (should (buffer-live-p right))
+          (with-current-buffer right (should-not align-buffer-mode)))
+      (when (buffer-live-p right) (kill-buffer right)))))
 
-(ert-deftest align-buffer-test-one-side-reads-two-buffers ()
-  "A side may take its rows from more than one source buffer."
-  (let* ((one (align-buffer-tests--source " *one*" "from one\n"))
-         (two (align-buffer-tests--source " *two*" "from two\n"))
-         (plan (align-buffer-plan-create
-                :left-name " *mixed left*"
-                :right-name " *mixed right*"
-                :rows (vector (align-buffer-row-create
-                               :left (align-buffer-tests--line-cell one 1)
-                               :right (align-buffer-tests--blank-cell))
-                              (align-buffer-row-create
-                               :left (align-buffer-tests--line-cell two 1)
-                               :right (align-buffer-tests--blank-cell))))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (progn
-                (should (equal (with-current-buffer
-                                   (align-buffer-buffer session 'left)
-                                 (buffer-substring-no-properties
-                                  (point-min) (point-max)))
-                               "from one\nfrom two\n"))
-                (should (equal (align-buffer-sources session 'left)
-                               (list one two)))
-                (should (equal (align-buffer-source-rows session two 1)
-                               '((1 . left)))))
-            (align-buffer-quit session)))
-      (kill-buffer one)
-      (kill-buffer two))))
-
-(ert-deftest align-buffer-test-hooks-run ()
-  "The layout, build and teardown hooks run with what they promise."
-  (align-buffer-tests--with-plan plan
-    (let* ((seen nil)
-           (align-buffer-post-build-functions
-            (list (lambda (session) (push (cons 'build session) seen))))
-           (align-buffer-post-layout-functions
-            (list (lambda (session windows)
-                    (push (list 'layout session (length windows)) seen))))
-           (align-buffer-pre-teardown-functions
-            (list (lambda (session) (push (cons 'teardown session) seen))))
-           (session (align-buffer-show plan)))
-      (align-buffer-quit session)
-      (should (equal (mapcar #'car (reverse seen)) '(build layout teardown)))
-      (should (equal (nth 2 (assq 'layout seen)) 2)))))
-
-(ert-deftest align-buffer-test-quit-collapses-onto-the-window-a-hook-left ()
-  "Quit collapses onto whichever pane window its teardown hook left on screen.
-A consumer grouping the panes deletes one of them from that hook, and the other
-may then be the only ordinary window on the frame."
-  (align-buffer-tests--with-plan plan
+(ert-deftest align-buffer-test-a-session-can-own-buffers ()
+  "A consumer that made a buffer to show names it, and it goes at teardown."
+  (let* ((left (align-buffer-tests--buffer "align-owned" 20))
+         (right (align-buffer-tests--buffer "align-right" 20)))
     (delete-other-windows)
-    (let* ((align-buffer-pre-teardown-functions
-            (list (lambda (session)
-                    (delete-window (get-buffer-window
-                                    (align-buffer-buffer session 'left))))))
-           (session (align-buffer-show plan))
-           (survivor (get-buffer-window (align-buffer-buffer session 'right))))
-      (align-buffer-quit session)
-      (should (window-live-p survivor))
-      (should (equal (window-list nil 'no-mini) (list survivor))))))
-
-(ert-deftest align-buffer-test-quit-spares-a-window-that-holds-no-pane ()
-  "Quit deletes the pane windows its teardown hook left, and nothing besides.
-The place the panes held stays on the frame, showing what it falls back to."
-  (align-buffer-tests--with-plan plan
-    (delete-other-windows)
-    (let* ((other (split-window nil nil 'below))
-           (align-buffer-pre-teardown-functions
-            (list (lambda (session)
-                    (delete-window (get-buffer-window
-                                    (align-buffer-buffer session 'left))))))
-           (session (align-buffer-show plan))
-           (survivor (get-buffer-window (align-buffer-buffer session 'right))))
-      (align-buffer-quit session)
-      (should (window-live-p other))
-      (should (window-live-p survivor))
-      (should (= (length (window-list nil 'no-mini)) 2)))))
-
-(ert-deftest align-buffer-test-rebuild-lets-a-consumer-redraw ()
-  "A rebuild runs the build and layout hooks, and spares what a consumer drew.
-Rendering clears the panes, so a decoration is gone and its owner needs both the
-news and its overlay left alone until then."
-  (align-buffer-tests--with-plan plan
-    (let* ((seen nil)
-           (theirs nil)
-           (align-buffer-post-build-functions
-            (list (lambda (session)
-                    (push 'build seen)
-                    (with-current-buffer (align-buffer-buffer session 'left)
-                      (setq theirs (make-overlay (point-min) (point-max)))
-                      (overlay-put theirs 'consumer-decoration t)))))
-           (align-buffer-post-layout-functions
-            (list (lambda (_session windows) (push (length windows) seen))))
-           (session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (setq seen nil)
-            (align-buffer-rebuild session (align-buffer-session-plan session))
-            (should (equal (reverse seen) '(build 2)))
-            (should (overlay-buffer theirs))
-            (should (overlay-get theirs 'consumer-decoration)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-a-render-that-signals-leaves-nothing-behind ()
-  "A plan that cannot be rendered takes its half-built panes with it."
-  (let* ((before (length (buffer-list)))
-         (plan (align-buffer-plan-create
-                :left-name " *doomed left*"
-                :right-name " *doomed right*"
-                :rows (vector nil))))
-    (should-error (align-buffer-show plan))
-    (should (null align-buffer--sessions))
-    (should-not (get-buffer " *doomed left*"))
-    (should-not (get-buffer " *doomed right*"))
-    (should (= (length (buffer-list)) before))))
-
-(ert-deftest align-buffer-test-a-plan-can-own-buffers ()
-  "Buffers the plan names as its own are killed with the session.
-A generator that made a buffer to read from - a revision, a scratch source -
-says so on the plan rather than tearing it down itself."
-  (align-buffer-tests--with-plan plan
-    (let ((owned (generate-new-buffer " *owned source*")))
-      (setf (align-buffer-plan-properties plan) (list :owned-buffers (list owned)))
-      (align-buffer-quit (align-buffer-show plan))
-      (should-not (buffer-live-p owned)))))
+    (align-buffer-quit (align-buffer-show left right '((1 . 1))
+                                          (list :owned-buffers (list left))))
+    (should-not (buffer-live-p left))
+    (should (buffer-live-p right))
+    (kill-buffer right)))
 
 (ert-deftest align-buffer-test-an-owned-buffer-with-edits-survives ()
-  "A buffer the reader has edited is theirs, whoever named it."
-  (align-buffer-tests--with-plan plan
-    (let ((owned (generate-new-buffer " *owned and edited*")))
-      (with-current-buffer owned (insert "the reader typed this"))
-      (setf (align-buffer-plan-properties plan) (list :owned-buffers (list owned)))
-      (align-buffer-quit (align-buffer-show plan))
-      (should (buffer-live-p owned))
-      (kill-buffer owned))))
+  "A buffer the reader has changed is theirs, whoever named it."
+  (let* ((left (align-buffer-tests--buffer "align-owned" 20))
+         (right (align-buffer-tests--buffer "align-right" 20)))
+    (delete-other-windows)
+    (let ((session (align-buffer-show left right '((1 . 1))
+                                      (list :owned-buffers (list left)))))
+      (with-current-buffer left (insert "edited"))
+      (align-buffer-quit session))
+    (should (buffer-live-p left))
+    (dolist (buffer (list left right))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(ert-deftest align-buffer-test-quit-forgets-the-placement-record ()
-  "Teardown clears the record we kept on the windows.
-Left behind, the next session laid out in that window reads it as its own and
-skips the reader's first move there."
-  (align-buffer-tests--with-plan plan
-    (let* ((session (align-buffer-show plan))
-           (window (get-buffer-window (align-buffer-buffer session 'left))))
-      (align-buffer--note-placed window (window-start window) (window-point window))
-      (should (window-parameter window 'align-buffer-placed))
-      (align-buffer-quit session)
-      (should-not (window-parameter window 'align-buffer-placed)))))
-
-(ert-deftest align-buffer-test-one-session-does-not-drop-another-placement ()
-  "Tearing a session down leaves another session's queued placement alone."
-  (align-buffer-tests--with-plan first-plan
-    (align-buffer-tests--with-plan second-plan
-      (let* ((one (align-buffer-show first-plan))
-             (two (align-buffer-show second-plan))
-             (queued (list two nil 'left 3 nil)))
-        (unwind-protect
-            (progn
-              (setq align-buffer--pending-place queued)
-              (align-buffer-quit one)
-              (should (eq align-buffer--pending-place queued))
-              (align-buffer-forget-pending-place two)
-              (should-not align-buffer--pending-place))
-          (align-buffer-quit two))))))
-
-(ert-deftest align-buffer-test-refinement-covers-the-ranges-it-names ()
-  "A cell's refinement paints its ranges, over the row's own face.
-The ranges are character offsets into the row's text, which is what a generator
-that knows the intra-line difference can supply."
-  (let* ((source (align-buffer-tests--source " *refined*" "int foo(int bar);
-"))
-         (plan (align-buffer-plan-create
-                :left-name " *refined left*"
-                :right-name " *refined right*"
-                :rows (vector
-                       (align-buffer-row-create
-                        :left (align-buffer-cell-create
-                               :kind 'line :source source :line 1 :face 'shadow
-                               :refinement '((4 7 success) (12 15 warning)))
-                        :right (align-buffer-tests--blank-cell))))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'left)
-                (let ((refinements
-                       (sort (seq-filter
-                              (lambda (overlay)
-                                (overlay-get overlay 'align-buffer-refinement))
-                              (overlays-in (point-min) (point-max)))
-                             (lambda (one other)
-                               (< (overlay-start one) (overlay-start other))))))
-                  (should (equal (mapcar (lambda (overlay)
-                                           (list (buffer-substring-no-properties
-                                                  (overlay-start overlay)
-                                                  (overlay-end overlay))
-                                                 (overlay-get overlay 'face)))
-                                         refinements)
-                                 '(("foo" success) ("bar" warning))))
-                  ;; Above the row face, or the row's colour would hide them.
-                  (should (cl-every (lambda (overlay)
-                                      (> (or (overlay-get overlay 'priority) 0) 0))
-                                    refinements))))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-refinement-stops-at-the-row-end ()
-  "A range reaching past the line stops at it rather than covering the newline."
-  (let* ((source (align-buffer-tests--source " *short*" "ab
-"))
-         (plan (align-buffer-plan-create
-                :left-name " *short left*"
-                :right-name " *short right*"
-                :rows (vector
-                       (align-buffer-row-create
-                        :left (align-buffer-cell-create
-                               :kind 'line :source source :line 1
-                               :refinement '((0 40 success)))
-                        :right (align-buffer-tests--blank-cell))))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'left)
-                (let ((overlay (car (seq-filter
-                                     (lambda (overlay)
-                                       (overlay-get overlay 'align-buffer-refinement))
-                                     (overlays-in (point-min) (point-max))))))
-                  (should (equal (buffer-substring-no-properties
-                                  (overlay-start overlay) (overlay-end overlay))
-                                 "ab"))))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-faces-can-be-copied-again ()
-  "A face the source gains after the build reaches the pane on a refresh.
-Which is what a language server's semantic tokens need: they arrive well after
-the panes were rendered."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (should (null (with-current-buffer (align-buffer-buffer session 'left)
-                            (get-text-property (point-min) 'face))))
-            (with-current-buffer old
-              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
-            (should (= (align-buffer-refresh-faces session old) 3))
-            (should (eq (with-current-buffer (align-buffer-buffer session 'left)
-                          (get-text-property (point-min) 'face))
-                        'success)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-copying-again-keeps-to-one-source ()
-  "A refresh touches only the rows that read the buffer it was given."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (with-current-buffer new
-              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
-            ;; The right pane reads `new' on all four rows, the left never.
-            (should (= (align-buffer-refresh-faces session new) 4))
-            (should (null (with-current-buffer (align-buffer-buffer session 'left)
-                            (get-text-property (point-min) 'face)))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-copying-again-can-take-a-line-range ()
-  "A refresh limited to a line range leaves the rows outside it alone."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (with-current-buffer old
-              (put-text-property (point-min) (point-max) 'face 'success))
-            (should (= (align-buffer-refresh-faces session old 2 3) 2))
-            ;; Row zero reads line one, which the range left out.
-            (should (null (with-current-buffer (align-buffer-buffer session 'left)
-                            (get-text-property (point-min) 'face)))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-copying-again-skips-a-line-of-another-length ()
-  "A source line that has grown or shrunk means a stale plan, so it is skipped."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (with-current-buffer old
-              (goto-char (point-min))
-              (insert "much longer now ")
-              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
-            (should (= (align-buffer-refresh-faces session old 1 1) 0)))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-copying-again-skips-a-line-that-reads-otherwise ()
-  "A source line rewritten to the same length is skipped too.
-Its faces describe text the pane does not show, so painting them would colour
-whatever happens to sit at those offsets."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (with-current-buffer old
-              ;; "alpha" becomes "ALPHA", same length, every character different.
-              (goto-char (point-min))
-              (delete-region (point-min) (+ (point-min) 5))
-              (insert "ALPHA")
-              (put-text-property (point-min) (+ (point-min) 5) 'face 'success))
-            (should (= (align-buffer-refresh-faces session old 1 1) 0))
-            (should (null (with-current-buffer (align-buffer-buffer session 'left)
-                            (get-text-property (point-min) 'face))))
-            ;; And the pane still shows what the plan was made from.
-            (should (equal (with-current-buffer (align-buffer-buffer session 'left)
-                             (buffer-substring-no-properties
-                              (point-min) (+ (point-min) 5)))
-                           "alpha")))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-copying-again-keeps-the-overlays ()
-  "A refresh replaces properties, not text, so the gutter survives it."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (with-current-buffer (align-buffer-buffer session 'left)
-            (let ((before (length (align-buffer-tests--gutter-overlays))))
-              (align-buffer-refresh-faces session old)
-              (should (= (length (align-buffer-tests--gutter-overlays)) before))
-              (should-not (buffer-modified-p))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-gutter-width ()
-  "The gutter is as wide as its largest number, and absent without numbers."
-  (align-buffer-tests--with-plan plan
-    (let ((rows (align-buffer-plan-rows plan)))
-      (should (= (align-buffer--gutter-width rows 'left) 3))
-      (should (= (align-buffer--gutter-width
-                 (vector (align-buffer-row-create
-                          :left (align-buffer-tests--blank-cell)
-                          :right (align-buffer-tests--text-cell "no number")))
-                 'right)
-                0)))))
-
-(ert-deftest align-buffer-test-gutter-can-be-turned-off ()
-  "With the gutter off a pane has no margin and no gutter overlay."
-  (align-buffer-tests--with-plan plan
-    (let* ((align-buffer-show-gutter nil)
-           (session (align-buffer-show plan)))
-      (unwind-protect
-          (with-current-buffer (align-buffer-buffer session 'left)
-            (should (= (align-buffer-session-left-gutter-width session) 0))
-            (should-not left-margin-width)
-            (should (null (align-buffer-tests--gutter-overlays))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-gutter-shows-the-source-line-numbers ()
-  "Each row carries a margin strip: its source line number, or blank padding.
-The strip is what the reader sees in place of native line numbers, which count
-pane lines rather than source lines."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (with-current-buffer (align-buffer-buffer session 'left)
-            (should (= left-margin-width
-                       (align-buffer-session-left-gutter-width session)))
-            (should (= (length (align-buffer-tests--gutter-overlays))
-                       (align-buffer-row-count session)))
-            (should (equal (align-buffer-tests--gutter-numbers session 'left)
-                           '("1" nil "2" "3"))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-refresh-keeps-the-viewport ()
-  "Rebuilding from the same plan leaves the panes where they were."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 60) "\n"))
-         (old (align-buffer-tests--source " *refresh old*" text))
-         (new (align-buffer-tests--source " *refresh new*" text)))
-    (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 60))))
-          (unwind-protect
-              (let ((window (get-buffer-window
-                             (align-buffer-buffer session 'left))))
-                (set-window-start window
-                                  (align-buffer-row-beginning-position session 12 'left))
-                (align-buffer-rebuild session (align-buffer-session-plan session))
-                (should (= (with-current-buffer (window-buffer window)
-                             (align-buffer-row-at-point (window-start window)))
-                           12)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
-
-(ert-deftest align-buffer-test-quit-collapses-to-one-window ()
-  "Quitting leaves a single window showing something other than a pane."
-  (align-buffer-tests--with-plan plan
-    (let ((before (length (window-list)))
-          (session (align-buffer-show plan)))
-      (should (= (length (window-list)) (1+ before)))
-      (align-buffer-quit session)
-      (should (= (length (window-list)) before))
-      (should-not (align-buffer-current-session)))))
-
-(ert-deftest align-buffer-test-sync-survives-a-rebuild ()
-  "Both panes carry the sync triggers, after a build and after a rebuild.
-Entering the pane's major mode clears buffer-local hooks, so a rebuild that does
-not put them back leaves only the scroll hook, which cannot cover the cases the
-command hook does."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (dolist (stage '(built rebuilt))
-            (when (eq stage 'rebuilt)
-              (align-buffer-rebuild session (align-buffer-session-plan session)))
-            (dolist (side '(left right))
-              (with-current-buffer (align-buffer-buffer session side)
-                (should (memq #'align-buffer--scroll-hook window-scroll-functions))
-                (should (memq #'align-buffer--post-command post-command-hook))
-                (should (local-variable-p 'window-scroll-functions))
-                (should (local-variable-p 'post-command-hook)))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-an-unrelated-buffer-of-that-name-is-untouched ()
-  "We never take over a buffer we do not own, and never erase it.
-Rendering erases what it is given with undo off, so taking over a file's buffer
-would destroy it, and a generator naming panes after paths will meet one."
-  (let ((bystander (align-buffer-tests--source " *taken*" "precious\n")))
-    (unwind-protect
-        (let* ((plan (align-buffer-plan-create
-                      :left-name " *taken*"
-                      :right-name " *taken right*"
-                      :rows (vector (align-buffer-row-create))))
-               (session (align-buffer-show plan)))
-          (unwind-protect
-              (progn
-                (should-not (eq (align-buffer-buffer session 'left) bystander))
-                (should (buffer-live-p bystander))
-                (should (equal (with-current-buffer bystander (buffer-string))
-                               "precious\n")))
-            (align-buffer-quit session)))
-      (kill-buffer bystander))))
-
-(ert-deftest align-buffer-test-a-pane-may-be-off-screen ()
-  "A session with only one pane displayed stays alive, and syncing is a no-op.
-Where the panes go is the user's to arrange, so anything may take a pane's
-window; we look windows up by buffer each time and do nothing when one is gone."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 40) "\n"))
-         (old (align-buffer-tests--source " *offscreen old*" text))
-         (new (align-buffer-tests--source " *offscreen new*" text))
-         (elsewhere (align-buffer-tests--source " *elsewhere*" "other\n")))
-    (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 40))))
-          (unwind-protect
-              (let* ((left (align-buffer-buffer session 'left))
-                     (window (get-buffer-window left))
-                     (survivor (get-buffer-window
-                                (align-buffer-buffer session 'right))))
-                (set-window-buffer window elsewhere)
-                (should (align-buffer-session-live-p session))
-                (should-not (get-buffer-window left))
-                (let ((before (window-start window)))
-                  (align-buffer-sync survivor)
-                  (should (= (window-start window) before))
-                  (should (eq (window-buffer window) elsewhere)))
-                (set-window-buffer window left)
-                (set-window-start survivor
-                                  (align-buffer-row-beginning-position session 10 'right))
-                (set-window-point survivor
-                                  (align-buffer-row-beginning-position session 20 'right))
-                (align-buffer-sync survivor)
-                (should (= (with-current-buffer left
-                             (align-buffer-row-at-point (window-start window)))
-                           10)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new)
-      (kill-buffer elsewhere))))
-
-(ert-deftest align-buffer-test-two-sessions-do-not-share-panes ()
-  "Two plans asking for the same pane name get a pane each."
-  (align-buffer-tests--with-plan first-plan
-    (align-buffer-tests--with-plan second-plan
-      (let* ((first (align-buffer-show first-plan))
-             (second (align-buffer-show second-plan)))
-        (unwind-protect
-            (progn
-              (should-not (eq (align-buffer-buffer first 'left)
-                              (align-buffer-buffer second 'left)))
-              (align-buffer-quit second)
-              (should (align-buffer-session-live-p first)))
-          (when (align-buffer-session-live-p first) (align-buffer-quit first)))))))
-
-(ert-deftest align-buffer-test-quit-restores-the-buffer-underneath ()
-  "The surviving window goes back to what it showed, not one step further."
-  (let ((underneath (align-buffer-tests--source "*align-buffer underneath*"
-                                                "text\n")))
-    (unwind-protect
-        (align-buffer-tests--with-plan plan
-          (switch-to-buffer underneath)
-          (let ((session (align-buffer-show plan)))
-            (align-buffer-quit session)
-            (should (eq (window-buffer (selected-window)) underneath))))
-      (kill-buffer underneath))))
-
-(ert-deftest align-buffer-test-explicit-sections-are-usable ()
-  "A plan may hand us its sections as a list, as its docstring says."
-  (align-buffer-tests--with-plan plan
-    (setf (align-buffer-plan-sections plan) '((1 . 2)))
-    (let ((session (align-buffer-show plan)))
-      (unwind-protect
-          (progn
-            (should (equal (align-buffer-session-sections session) [(1 . 2)]))
-            (with-current-buffer (align-buffer-buffer session 'right)
-              (goto-char (point-min))
-              (align-buffer-next-section)
-              (should (= (align-buffer-row-at-point) 1))))
-        (align-buffer-quit session)))))
-
-(ert-deftest align-buffer-test-visit-source-refuses-a-text-row ()
-  "Text a generator supplied stands for no line of any buffer."
-  (let* ((source (align-buffer-tests--source " *refuses*" "real\n"))
-         (plan (align-buffer-plan-create
-                :left-name " *refuses left*"
-                :right-name " *refuses right*"
-                :rows (vector (align-buffer-row-create
-                               :left (align-buffer-tests--line-cell source 1)
-                               :right (align-buffer-tests--text-cell "invented"))))))
-    (unwind-protect
-        (let ((session (align-buffer-show plan)))
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'right)
-                (goto-char (point-min))
-                (should-error (align-buffer-visit-source) :type 'user-error))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-text-cells-render-their-own-text ()
-  (let* ((plan (align-buffer-plan-create
-                :left-name " *text left*"
-                :right-name " *text right*"
-                :rows (vector (align-buffer-row-create
-                               :left (align-buffer-tests--text-cell "invented")
-                               :right (align-buffer-tests--blank-cell)))))
-         (session (align-buffer-show plan)))
-    (unwind-protect
-        (should (equal (with-current-buffer (align-buffer-buffer session 'left)
-                         (buffer-substring-no-properties (point-min) (point-max)))
-                       "invented\n"))
-      (align-buffer-quit session))))
-
-(ert-deftest align-buffer-test-copied-face-matches-the-source ()
-  "The pane's face at a position is the one the source has there."
-  (let* ((source (align-buffer-tests--source
-                  " *matching*" ";; comment\n" #'emacs-lisp-mode))
-         (plan (align-buffer-plan-create
-                :left-name " *matching left*"
-                :right-name " *matching right*"
-                :rows (vector (align-buffer-row-create
-                               :left (align-buffer-tests--line-cell source 1)
-                               :right (align-buffer-tests--blank-cell))))))
-    (unwind-protect
-        (let* ((session (align-buffer-show plan))
-               (wanted (with-current-buffer source
-                         (get-text-property (point-min) 'face))))
-          (should wanted)
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'left)
-                (should (equal (get-char-property (point-min) 'face) wanted)))
-            (align-buffer-quit session)))
-      (kill-buffer source))))
-
-(ert-deftest align-buffer-test-teardown-runs-once ()
-  "Killing a pane during teardown does not tear the session down twice."
-  (align-buffer-tests--with-plan plan
-    (let* ((runs 0)
-           (align-buffer-pre-teardown-functions
-            (list (lambda (_session) (setq runs (1+ runs)))))
-           (session (align-buffer-show plan)))
-      (kill-buffer (align-buffer-buffer session 'left))
-      (should (= runs 1))
-      (should-not (align-buffer-sessions)))))
-
-(ert-deftest align-buffer-test-a-dead-session-leaves-the-registry ()
-  "A session whose panes went away is forgotten, not merely filtered out."
-  (align-buffer-tests--with-plan plan
-    (let ((session (align-buffer-show plan)))
-      (let ((align-buffer--tearing-down t))
-        (dolist (side '(left right))
-          (kill-buffer (align-buffer-buffer session side))))
-      (should-not (align-buffer-sessions))
-      (should-not (memq session align-buffer--sessions)))))
-
-(ert-deftest align-buffer-test-row-at-point-agrees-with-counting-lines ()
-  "The searched row and the counted line agree, at every row and both edges."
-  (let* ((text (mapconcat #'number-to-string (number-sequence 1 40) "\n"))
-         (old (align-buffer-tests--source " *search old*" text))
-         (new (align-buffer-tests--source " *search new*" text)))
-    (unwind-protect
-        (let ((session (align-buffer-show
-                        (align-buffer-tests--big-plan old new 40))))
-          (unwind-protect
-              (with-current-buffer (align-buffer-buffer session 'left)
-                (dotimes (row 40)
-                  (let ((start (align-buffer-row-beginning-position session row 'left)))
-                    (should (= (align-buffer-row-at-point start) row))
-                    (should (= (align-buffer-row-at-point
-                                (align-buffer--row-end session row 'left))
-                               row))))
-                (should (= (align-buffer-row-at-point (point-min)) 0)))
-            (align-buffer-quit session)))
-      (kill-buffer old)
-      (kill-buffer new))))
+(ert-deftest align-buffer-test-the-hooks-run ()
+  (let ((laid-out nil)
+        (torn-down nil))
+    (let ((align-buffer-post-layout-functions
+           (list (lambda (session windows) (setq laid-out (cons session windows)))))
+          (align-buffer-pre-teardown-functions
+           (list (lambda (session) (setq torn-down session)))))
+      (align-buffer-tests--with-session '((1 . 1))
+					(should (eq (car laid-out) session))
+					(should (= (length (cdr laid-out)) 2)))
+      (should torn-down))))
 
 (provide 'align-buffer-tests)
 

@@ -3,10 +3,10 @@
 ;;; Commentary:
 
 ;; Batch Emacs never redisplays, so `window-scroll-functions' never fires there
-;; and the scroll sync cannot be tested at all.  These scenarios therefore run in
-;; a graphical Emacs, driving REAL input through `execute-kbd-macro' so that the
-;; command loop and its hooks run for themselves, and synthesising wheel events
-;; as `(wheel-down POSITION 1)' vectors.
+;; and the scroll sync cannot be tested at all.  These scenarios therefore run
+;; in a graphical Emacs, driving REAL input through `execute-kbd-macro' so that
+;; the command loop and its hooks run for themselves, and synthesising wheel
+;; events as `(wheel-down POSITION 1)' vectors.
 ;;
 ;; Two things this cannot do.  It cannot see paint: every assertion here reads
 ;; window state, and a window whose start is right while its pixels are stale
@@ -15,8 +15,14 @@
 ;;
 ;; The scroll configuration below is not decoration.  With the -Q default of
 ;; `scroll-conservatively' at 0, Emacs recentres instead of scrolling by a line,
-;; and the whole class of bug these scenarios exist for lives in the single-line
-;; path.  A run on the defaults quietly tests a different Emacs.
+;; and the whole class of bug these scenarios exist for lives in the
+;; single-line path.  A run on the defaults quietly tests a different Emacs.
+;;
+;; THE INVARIANT.  Everything asserts one thing: the pair governing the line
+;; point is on in the leader sits on the same screen row in both windows.  When
+;; that pair has scrolled off the leader's top it has no row there, and the
+;; follower is then expected to show its counterpart on row zero, which is what
+;; stops an unpaired run from dragging the follower along.
 ;;
 ;; Run it with:
 ;;
@@ -48,360 +54,447 @@
 ;;; Saying what happened
 
 (defun align-buffer-integration--expect (scenario what wanted got)
-  "Record whether WANTED and GOT agree for WHAT in SCENARIO."
+  "Record that SCENARIO wanted WANTED for WHAT and got GOT."
   (unless (equal wanted got)
-    (push (format "%s: %s wanted %S, got %S" scenario what wanted got)
+    (push (format "%s: %s: wanted %S, got %S" scenario what wanted got)
           align-buffer-integration--failures)))
 
+
+;;; Reading the two windows
+
+(defun align-buffer-integration--leader ()
+  "Return the selected window when it shows a buffer taking part."
+  (let ((window (selected-window)))
+    (and (buffer-local-value 'align-buffer--side (window-buffer window))
+         window)))
+
+(defun align-buffer-integration--anchor (session leader)
+  "Return the pair governing LEADER's point line, or nil when none does."
+  (let* ((side (buffer-local-value 'align-buffer--side (window-buffer leader)))
+         (line (align-buffer-line-at (window-buffer leader)
+                                     (window-point leader)))
+         (anchor (and line (align-buffer-anchor session side line))))
+    (and anchor (<= (car anchor) line) (cons side anchor))))
+
+(defun align-buffer-integration--row (window line)
+  "Return the screen row LINE sits on in WINDOW, or nil when it is not shown."
+  (align-buffer--rows-from-start
+   window (align-buffer-line-position (window-buffer window) line)))
+
+(defun align-buffer-integration--rows (session)
+  "Return (LEADER-ROW . FOLLOWER-ROW) for the governing pair, or nil."
+  (let* ((leader (align-buffer-integration--leader))
+         (found (and leader (align-buffer-integration--anchor session leader))))
+    (when found
+      (let* ((side (car found))
+             (anchor (cdr found))
+             (follower (align-buffer--follower session side)))
+        (when (window-live-p follower)
+          (cons (align-buffer-integration--row leader (car anchor))
+                (align-buffer-integration--row follower (cdr anchor))))))))
+
+(defun align-buffer-integration--level-p (session)
+  "Return non-nil when the governing pair sits on one row in both windows."
+  (let ((rows (align-buffer-integration--rows session)))
+    (and rows (equal (cdr rows) (or (car rows) 0)))))
+
 (defun align-buffer-integration--starts (session)
-  "Return both panes' top rows as (LEFT RIGHT)."
-  (mapcar (lambda (side)
-            (let* ((buffer (align-buffer-buffer session side))
-                   (window (get-buffer-window buffer)))
-              (and window
-                   (with-current-buffer buffer
-                     (align-buffer-row-at-point (window-start window))))))
-          '(left right)))
+  "Return the line each of SESSION's windows begins at, as (LEFT . RIGHT)."
+  (cons (align-buffer-integration--start session 'left)
+        (align-buffer-integration--start session 'right)))
 
-(defun align-buffer-integration--points (session)
-  "Return both panes' point rows as (LEFT RIGHT)."
-  (mapcar (lambda (side)
-            (let* ((buffer (align-buffer-buffer session side))
-                   (window (get-buffer-window buffer)))
-              (and window
-                   (with-current-buffer buffer
-                     (align-buffer-row-at-point (window-point window))))))
-          '(left right)))
-
-(defun align-buffer-integration--aligned-p (session)
-  "Return non-nil when both panes show the same top row."
-  (let ((starts (align-buffer-integration--starts session)))
-    (and (car starts) (equal (car starts) (cadr starts)))))
+(defun align-buffer-integration--start (session side)
+  "Return the line SESSION's SIDE window begins at."
+  (let ((window (get-buffer-window (align-buffer-buffer session side))))
+    (and (window-live-p window)
+         (align-buffer-line-at (window-buffer window) (window-start window)))))
 
 
 ;;; Driving the display
 
 (defun align-buffer-integration--settle ()
-  "Let redisplay run and any no-delay timer fire."
-  (redisplay t)
-  (sit-for 0.05)
-  (redisplay t))
+  "Let the timers and the redisplay they ask for run."
+  (dotimes (_ 3)
+    (redisplay t)
+    (sit-for 0.05)))
 
 (defun align-buffer-integration--wheel (window direction)
-  "Send one WHEEL event of DIRECTION over WINDOW."
-  (let ((position (with-selected-window window
-                    (posn-at-point (window-point window) window))))
-    (execute-kbd-macro (vector (list direction position 1)))
-    (align-buffer-integration--settle)))
+  "Send one wheel notch of DIRECTION over WINDOW, and let it settle."
+  (align-buffer-integration--wheel-without-settling window direction)
+  (align-buffer-integration--settle))
 
 (defun align-buffer-integration--wheel-without-settling (window direction)
-  "Send one WHEEL event over WINDOW and let nothing settle."
-  (let ((position (with-selected-window window
-                    (posn-at-point (window-point window) window))))
+  "Send one wheel notch of DIRECTION over WINDOW."
+  (let ((position (list window (window-start window) '(0 . 0) 0)))
     (execute-kbd-macro (vector (list direction position 1)))))
 
-(defun align-buffer-integration--leave-point-in-the-margin (session rows-down)
-  "Scroll the selected pane ROWS-DOWN with its point inside the bottom margin.
-
-Start and point are set together, which is what the wheel does and what a script
-cannot do in two steps: redisplay would correct the point in between.  From here
-redisplay will scroll the pane by itself, so a sync that reads the top as it
-momentarily is follows a viewport that is about to move."
-  (let* ((window (selected-window))
-         (side (buffer-local-value 'align-buffer--side (window-buffer window)))
-         (height (window-body-height window))
-         (margin (align-buffer--effective-margin window))
-         (top rows-down)
-         (point-row (- (+ top height) margin)))
-    (set-window-start window (align-buffer-row-beginning-position
-                              session top side))
-    (set-window-point window (align-buffer-row-beginning-position
-                              session point-row side))))
-
 (defun align-buffer-integration--keys (keys)
-  "Type KEYS, a `kbd' string, through the command loop."
+  "Run KEYS, a `kbd' string, as real input, and let it settle."
   (execute-kbd-macro (kbd keys))
   (align-buffer-integration--settle))
 
-(defun align-buffer-integration--session ()
-  "Build a session of 200 rows and return it, with the right pane selected."
-  (let* ((text (mapconcat (lambda (number) (format "line %d of the file" number))
-                          (number-sequence 1 200) "\n"))
-         (left (generate-new-buffer " *integration left source*"))
-         (right (generate-new-buffer " *integration right source*")))
-    (dolist (buffer (list left right))
-      (with-current-buffer buffer (insert text) (goto-char (point-min))))
-    (delete-other-windows)
-    (align-buffer-show
-     (align-buffer-plan-create
-      :left-name "*integration left*"
-      :right-name "*integration right*"
-      :rows (vconcat
-             (cl-loop for line from 1 to 200
-                      collect (align-buffer-row-create
-                               :left (align-buffer-cell-create
-                                      :kind 'line :source left :line line)
-                               :right (align-buffer-cell-create
-                                       :kind 'line :source right :line line))))))))
+(defun align-buffer-integration--pairs ()
+  "Return a correspondence with every shape the sync has to cope with.
+Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
+220 of the left moved to the end of the right; the rest pairs in order."
+  (append
+   (cl-loop for line from 1 to 100 collect (cons line line))
+   (cl-loop for offset from 0 below 60
+            collect (cons (+ 141 offset) (+ 101 offset)))
+   (cl-loop for offset from 0 below 20
+            collect (cons (+ 201 offset) (+ 280 offset)))
+   (cl-loop for offset from 0 below 80
+            collect (cons (+ 221 offset) (+ 161 offset)))))
 
-(defun align-buffer-integration--point-to-bottom-edge (session)
-  "Put point on the last row of the selected pane that does not yet scroll."
-  (let* ((window (selected-window))
-         (side (buffer-local-value 'align-buffer--side (window-buffer window)))
-         (top (align-buffer-row-at-point-in-window window))
-         (height (window-body-height window))
-         (margin (align-buffer--effective-margin window)))
-    (with-selected-window window
-      (goto-char (align-buffer-row-beginning-position
-                  session (- (+ top height) margin 1) side)))
+(defun align-buffer-integration--buffer (name count)
+  "Return a buffer called NAME holding COUNT numbered lines."
+  (let ((buffer (generate-new-buffer name)))
+    (with-current-buffer buffer
+      (dotimes (index count)
+        (insert (format "%s line %03d\n" name (1+ index))))
+      (setq-local truncate-lines t)
+      (set-buffer-modified-p nil)
+      (goto-char (point-min)))
+    buffer))
+
+(defun align-buffer-integration--session ()
+  "Build a session over two real buffers, and return it."
+  (delete-other-windows)
+  (let ((left (align-buffer-integration--buffer "old" 300))
+        (right (align-buffer-integration--buffer "new" 300)))
+    (let ((session (align-buffer-show left right
+                                      (align-buffer-integration--pairs)
+                                      (list :owned-buffers (list left right)))))
+      (align-buffer-integration--settle)
+      session)))
+
+(defun align-buffer-integration--view (session side line point-line)
+  "Put SESSION's SIDE window at LINE with point on POINT-LINE, and let it settle."
+  (let* ((window (get-buffer-window (align-buffer-buffer session side)))
+         (buffer (window-buffer window)))
+    (select-window window)
+    (set-window-start window (align-buffer-line-position buffer line))
+    (align-buffer--set-point window (align-buffer-line-position buffer point-line))
     (align-buffer-integration--settle)))
 
-(defun align-buffer-row-at-point-in-window (window)
-  "Return the top row of WINDOW."
-  (with-current-buffer (window-buffer window)
-    (align-buffer-row-at-point (window-start window))))
+(defun align-buffer-integration--lengthen (session line)
+  "Make LINE of both of SESSION's buffers wider than the window showing it."
+  (dolist (side '(left right))
+    (let* ((window (get-buffer-window (align-buffer-buffer session side)))
+           (buffer (window-buffer window)))
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char (align-buffer-line-position buffer line))
+          (end-of-line)
+          (insert (make-string (* 2 (window-body-width window)) ?x)))
+        (set-buffer-modified-p nil)))))
 
-(defun align-buffer-integration--other-window (session)
-  "Return the window showing the pane the user is not in."
-  (let ((side (buffer-local-value 'align-buffer--side
-                                 (window-buffer (selected-window)))))
-    (get-buffer-window
-     (align-buffer-buffer session (align-buffer-other-side side)))))
+(defun align-buffer-integration--go (session side line)
+  "Select SESSION's SIDE window and put point on LINE there, as a command would."
+  (let ((window (get-buffer-window (align-buffer-buffer session side))))
+    (select-window window)
+    (with-current-buffer (window-buffer window)
+      (goto-char (align-buffer-line-position (current-buffer) line)))
+    (recenter)
+    (align-buffer-integration--settle)))
+
 
 
 ;;; The scenarios
 
-;; Does NOT discriminate: checked with the forced follower redisplay and the
-;; forced mode line update both stubbed out, and every scenario still passed.
-;; What that fix produces is pixels, and this harness reads window state.  Kept
-;; because a run of line motions is the commonest gesture there is.
 (align-buffer-integration-defscenario held-key
   (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
     (align-buffer-integration--keys "C-n C-n C-n C-n C-n C-n C-n C-n")
     (align-buffer-integration--expect
-     'held-key "panes aligned after eight line motions"
-     t (align-buffer-integration--aligned-p session))
+     'held-key "level after eight line motions"
+     t (align-buffer-integration--level-p session))
     (align-buffer-integration--keys "C-p C-p C-p")
     (align-buffer-integration--expect
-     'held-key "panes aligned after moving back"
-     t (align-buffer-integration--aligned-p session))
+     'held-key "level after moving back"
+     t (align-buffer-integration--level-p session))
     (align-buffer-quit session)))
 
-;; Does NOT discriminate, and is kept as ordinary regression coverage.  Checked:
-;; it passes with `align-buffer--settled-top' stubbed back to the raw viewport
-;; row.  The bug needs redisplay's correction of the leader to arrive while we
-;; are inside our own sync, which happens only through the forced redisplay in
-;; `post-command-hook'; a script redisplaying at top level is outside that guard,
-;; so the correction is simply followed.  The evidence for that fix is the log
-;; from a live session: the leader moved 17 to 18 with `:syncing t' set, and the
-;; misalignment the user could reproduce went away.
-(align-buffer-integration-defscenario wheel-over-the-active-pane
+(align-buffer-integration-defscenario a-page-at-a-time
   (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 20)
+    (align-buffer-integration--keys "C-v")
+    (align-buffer-integration--expect
+     'a-page-at-a-time "level after a page down"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-integration--keys "M-v")
+    (align-buffer-integration--expect
+     'a-page-at-a-time "level after a page back"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario wheel-over-the-active-window
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
     (dotimes (_ 4)
       (align-buffer-integration--wheel (selected-window) 'wheel-down))
     (align-buffer-integration--expect
-     'wheel-over-the-active-pane "panes aligned after a burst"
-     t (align-buffer-integration--aligned-p session))
-    (dotimes (_ 3)
-      (align-buffer-integration--wheel (selected-window) 'wheel-up))
-    (align-buffer-integration--expect
-     'wheel-over-the-active-pane "panes aligned scrolling back"
-     t (align-buffer-integration--aligned-p session))
+     'wheel-over-the-active-window "level after four notches"
+     t (align-buffer-integration--level-p session))
     (align-buffer-quit session)))
 
-;; Does NOT discriminate either, for the same reason, and was written to try.
-;; Setting a start and a point that redisplay will correct does reproduce the
-;; STATE, but the correction then arrives with nothing suppressing our response
-;; to it.  Kept because it exercises a viewport that is about to move, which
-;; nothing else here does.
+;;; Fails without the zero-delay timer (`defer-timer'): a notch over the window
+;;; the reader is not in runs its command hook before redisplay reaches us, so a
+;;; placement left for the next hook waits on the next keystroke.
+(align-buffer-integration-defscenario wheel-over-the-inactive-window
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    (let ((follower (get-buffer-window
+		     (align-buffer-session-right-buffer session))))
+      (align-buffer-integration--wheel follower 'wheel-down)
+      (align-buffer-integration--expect
+       'wheel-over-the-inactive-window "the other window followed it"
+       t (align-buffer-integration--level-p session)))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario wheel-burst-over-the-inactive-window
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    (let ((follower (get-buffer-window
+		     (align-buffer-session-right-buffer session))))
+      (dotimes (_ 5)
+	(align-buffer-integration--wheel-without-settling follower 'wheel-down))
+      (align-buffer-integration--settle)
+      (align-buffer-integration--expect
+       'wheel-burst-over-the-inactive-window "level after the burst"
+       t (align-buffer-integration--level-p session)))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario notches-arriving-faster-than-we-place
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    (dotimes (_ 6)
+      (align-buffer-integration--wheel-without-settling (selected-window)
+							'wheel-down))
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'notches-arriving-faster-than-we-place "level once the burst is over"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
 (align-buffer-integration-defscenario a-leader-about-to-be-corrected
   (let ((session (align-buffer-integration--session)))
-    (align-buffer-integration--leave-point-in-the-margin session 20)
-    (align-buffer-integration--settle)
-    (align-buffer-integration--expect
-     'a-leader-about-to-be-corrected "panes aligned once redisplay has settled"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-quit session)))
-
-;; Written to catch the frozen row and does NOT: checked with
-;; `align-buffer--apply-pending-place' stubbed back to using the queued row.
-;; Sending notches without settling still lets each one's command hook run, and
-;; that flushes the queue before the next arrives.  The evidence for that fix is
-;; again a live log, which showed `place-now requested 3' while the leader had
-;; already reached row 6.
-(align-buffer-integration-defscenario notches-arriving-faster-than-we-place
-  (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session)))
-    (dotimes (_ 5)
-      (align-buffer-integration--wheel-without-settling other 'wheel-down))
-    (align-buffer-integration--settle)
-    (align-buffer-integration--expect
-     'notches-arriving-faster-than-we-place "aligned once the burst is over"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-quit session)))
-
-;; Fails without: the one-shot timer in `align-buffer--defer-place'.  The command
-;; hook of the notch has already run by the time redisplay reaches us, so nothing
-;; would carry out the queued placement until the user's next keystroke.
-(align-buffer-integration-defscenario wheel-over-the-inactive-pane
-  (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session)))
-    (dotimes (index 4)
-      (align-buffer-integration--wheel other 'wheel-down)
-      (align-buffer-integration--expect
-       'wheel-over-the-inactive-pane (format "aligned after notch %d" (1+ index))
-       t (align-buffer-integration--aligned-p session)))
-    (align-buffer-quit session)))
-
-;; Fails without: the one-shot timer, along with the scenario above.  It does not
-;; discriminate for the frozen-row fix: `execute-kbd-macro' returns before the
-;; next notch is sent, so no notch arrives while a placement is still queued.
-(align-buffer-integration-defscenario wheel-burst-over-the-inactive-pane
-  (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session)))
-    (dotimes (_ 6) (align-buffer-integration--wheel other 'wheel-down))
-    (align-buffer-integration--expect
-     'wheel-burst-over-the-inactive-pane "aligned at the end of the burst"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-quit session)))
-
-;; Fails without: recording the point as well as the start in
-;; `align-buffer--note-placed'.  Point sync stops after a placement, because a
-;; start-only record reads as ours while the point has moved.
-;;
-;; Tracking bound on, since that is the behaviour under test rather than the
-;; default.
-(align-buffer-integration-defscenario point-follows-after-a-placement
-  (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session))
-         (align-buffer-sync-point t))
-    (align-buffer-integration--wheel other 'wheel-down)
-    (align-buffer-integration--keys "C-n C-n C-n")
-    (let ((points (align-buffer-integration--points session)))
-      (align-buffer-integration--expect
-       'point-follows-after-a-placement "both cursors on one row"
-       (car points) (cadr points)))
-    (align-buffer-quit session)))
-
-;; Fails without: the missing floor at row zero in `align-buffer--clamp-point-row'.
-;; With both panes at the top of the plan, a point move in one must not drag the
-;; other's point `scroll-margin' rows down, since nothing above row zero can make
-;; redisplay scroll the window back.
-(align-buffer-integration-defscenario the-top-of-the-plan-holds-its-point
-  (let* ((session (align-buffer-integration--session))
-         (follower (align-buffer-integration--other-window session)))
-    (align-buffer-integration--expect
-     'the-top-of-the-plan-holds-its-point "both panes start at row zero"
-     '(0 0) (align-buffer-integration--starts session))
-    (align-buffer-integration--keys "C-n C-n C-n C-n C-n")
-    (align-buffer-integration--expect
-     'the-top-of-the-plan-holds-its-point "the follower's point stayed on row zero"
-     0 (with-current-buffer (window-buffer follower)
-         (align-buffer-row-at-point (window-point follower))))
-    (align-buffer-quit session)))
-
-;; The other side of that option, and the reason it is off: a point move that
-;; scrolls nothing leaves the follower entirely alone, so nothing about it is
-;; written and nothing of it is repainted.
-(align-buffer-integration-defscenario a-safe-point-is-left-alone
-  (let* ((session (align-buffer-integration--session))
-         (align-buffer-sync-point nil)
-         (follower (align-buffer-integration--other-window session))
-         (where (lambda ()
-                  (with-current-buffer (window-buffer follower)
-                    (list (align-buffer-row-at-point (window-start follower))
-                          (align-buffer-row-at-point (window-point follower))))))
-         (before nil))
-    (align-buffer-integration--keys "C-v C-v")
-    (setq before (funcall where))
-    (align-buffer-integration--keys "C-n C-n C-n")
-    (align-buffer-integration--expect
-     'a-safe-point-is-left-alone "the follower's start and point both untouched"
-     before (funcall where))
-    (align-buffer-integration--keys "C-v")
-    (align-buffer-integration--expect
-     'a-safe-point-is-left-alone "and a scroll still syncs"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-quit session)))
-
-;; Does NOT discriminate: checked under the `placed-flag' break, which puts the
-;; consumed-flag shape back, and this passes.  Settling after each notch lets the
-;; scroll hook sync from the leader, and that path never asks the question this
-;; scenario is about.  `a-notch-after-a-placement' below is the one that catches
-;; it.
-(align-buffer-integration-defscenario one-notch-on-each-pane
-  (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session)))
-    (dotimes (_ 3) (align-buffer-integration--wheel other 'wheel-down))
-    (align-buffer-integration--wheel (selected-window) 'wheel-down)
-    (align-buffer-integration--expect
-     'one-notch-on-each-pane "the single notch on the active pane synced"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-quit session)))
-
-;; Fails without BOTH window guards, since either one catches this: a split
-;; leaves a one-line window showing the pane, which is too short to be a pane and
-;; is also a second window showing one.
-(align-buffer-integration-defscenario a-transient-window-does-not-lead
-  (let* ((session (align-buffer-integration--session))
-         (before nil))
-    (align-buffer-integration--keys "C-v")
-    (setq before (align-buffer-integration--starts session))
-    (let ((transient (split-window (selected-window) -2 'below)))
+    (align-buffer-integration--go session 'left 40)
+    ;; Point left where the bottom margin will make redisplay scroll the
+    ;; window, so a row read before that lands is a row too high.
+    (let* ((window (selected-window))
+	   (height (window-body-height window)))
+      (with-current-buffer (window-buffer window)
+	(goto-char (align-buffer-line-position
+		    (current-buffer)
+		    (+ (align-buffer-line-at (current-buffer)
+					     (window-start window))
+		       height -1))))
       (align-buffer-integration--settle)
-      (delete-window transient))
-    (align-buffer-integration--settle)
-    (align-buffer-integration--expect
-     'a-transient-window-does-not-lead "panes still aligned"
-     t (align-buffer-integration--aligned-p session))
-    (align-buffer-integration--expect
-     'a-transient-window-does-not-lead "and did not jump"
-     before (align-buffer-integration--starts session))
+      (align-buffer-integration--expect
+       'a-leader-about-to-be-corrected "level once the leader has settled"
+       t (align-buffer-integration--level-p session)))
     (align-buffer-quit session)))
 
-;;; Fails without: `align-buffer--can-lead-p'.  `which-key' puts its keys up in a
-;; side window, and `display-buffer-in-side-window' makes that window before it
-;; gives it a buffer, so for one redisplay it shows the pane its parent was
-;; showing, at its own height.
-(align-buffer-integration-defscenario a-side-window-does-not-lead
-  (let* ((session (align-buffer-integration--session))
-         (before nil)
-         (keys (generate-new-buffer " *integration side*")))
-    (align-buffer-integration--keys "C-v")
-    (setq before (align-buffer-integration--starts session))
-    (with-current-buffer keys
-      (insert "SPC f  file\nSPC b  buffer\nSPC p  project\n"))
-    (display-buffer-in-side-window
-     keys '((side . bottom) (slot . 0)
-            (window-height . (lambda (window) (fit-window-to-buffer window nil 1)))))
-    (align-buffer-integration--settle)
+;;; Fails without the missing floor at the first line (`clamp-floor'), which
+;;; otherwise drags the follower's point a margin down from a viewport at the top.
+(align-buffer-integration-defscenario the-top-of-the-buffer-holds-its-point
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 1)
+    (align-buffer-integration--keys "M-<")
     (align-buffer-integration--expect
-     'a-side-window-does-not-lead "panes still aligned"
-     t (align-buffer-integration--aligned-p session))
+     'the-top-of-the-buffer-holds-its-point "both windows start at the first line"
+     '(1 . 1) (align-buffer-integration--starts session))
     (align-buffer-integration--expect
-     'a-side-window-does-not-lead "and did not jump"
-     before (align-buffer-integration--starts session))
-    (delete-windows-on keys)
-    (kill-buffer keys)
+     'the-top-of-the-buffer-holds-its-point "the follower's point stayed on row zero"
+     1 (let ((follower (get-buffer-window
+			(align-buffer-session-right-buffer session))))
+	 (align-buffer-line-at (window-buffer follower)
+			       (window-point follower))))
     (align-buffer-quit session)))
 
-;; Fails without: looking windows up by buffer every time.  A pane may be off
-;; screen, and the sync must then do nothing rather than signal.
-(align-buffer-integration-defscenario a-pane-off-screen
+(align-buffer-integration-defscenario crossing-into-a-moved-block
+  (let ((session (align-buffer-integration--session)))
+    ;; Left 201 pairs with right 280, which is nowhere near where the lines
+    ;; before it pair.
+    (align-buffer-integration--go session 'left 195)
+    (let ((before (align-buffer-integration--start session 'right)))
+      (align-buffer-integration--go session 'left 205)
+      (align-buffer-integration--expect
+       'crossing-into-a-moved-block "level on the moved block"
+       t (align-buffer-integration--level-p session))
+      (align-buffer-integration--expect
+       'crossing-into-a-moved-block "and the follower did jump"
+       t (not (equal before (align-buffer-integration--start session 'right)))))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario back-out-of-a-moved-block
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 205)
+    (align-buffer-integration--go session 'left 230)
+    (align-buffer-integration--expect
+     'back-out-of-a-moved-block "level again after the block"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
+;;; Fails without the clamp (`clamp-off-screen-anchor') and without the placement
+;;; record answered by value (`placed-flag').
+(align-buffer-integration-defscenario an-unpaired-run-holds-the-follower
+  (let ((session (align-buffer-integration--session)))
+    ;; Left 101 to 140 pair with nothing.  Read deep enough into them that the
+    ;; last paired line, 100, has left the top of the leader: the follower is
+    ;; then expected to hold that line at its own top rather than scrolling on
+    ;; by the height of the run.
+    (align-buffer-integration--go session 'left 130)
+    (align-buffer-integration--expect
+     'an-unpaired-run-holds-the-follower "the follower waits on the last pair"
+     100 (align-buffer-integration--start session 'right))
+    (align-buffer-integration--go session 'left 138)
+    (align-buffer-integration--expect
+     'an-unpaired-run-holds-the-follower "and reading further does not move it"
+     100 (align-buffer-integration--start session 'right))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario one-notch-on-each-window
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    (let ((left (get-buffer-window (align-buffer-session-left-buffer session)))
+	  (right (get-buffer-window (align-buffer-session-right-buffer session))))
+      (align-buffer-integration--wheel left 'wheel-down)
+      (align-buffer-integration--wheel right 'wheel-down)
+      (align-buffer-integration--expect
+       'one-notch-on-each-window "level after a notch on each"
+       t (align-buffer-integration--level-p session)))
+    (align-buffer-quit session)))
+
+;;; Fails without `align-buffer--can-lead-p': `display-buffer' makes a window
+;;; before it gives it a buffer, so for one redisplay two windows show the same
+;;; buffer with different heights, and following the new one moves the follower
+;;; off by their difference.
+(align-buffer-integration-defscenario a-transient-window-does-not-lead
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    ;; Only the follower is asserted on.  Splitting the leader halves its
+    ;; height, and redisplay rescrolling a window whose point no longer clears
+    ;; the margin is correct behaviour rather than something to catch.
+    (let ((before (align-buffer-integration--start session 'right))
+	  (elsewhere (align-buffer-integration--buffer "elsewhere" 20)))
+      (let ((window (split-window (selected-window) nil 'below)))
+	(set-window-buffer window (window-buffer (selected-window)))
+	(align-buffer-integration--settle)
+	(set-window-buffer window elsewhere)
+	(align-buffer-integration--settle)
+	(when (window-live-p window) (delete-window window)))
+      (align-buffer-integration--settle)
+      (align-buffer-integration--expect
+       'a-transient-window-does-not-lead "the follower was not dragged"
+       before (align-buffer-integration--start session 'right))
+      (kill-buffer elsewhere))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario a-window-off-screen
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--go session 'left 40)
+    (let ((elsewhere (align-buffer-integration--buffer "elsewhere" 20))
+	  (follower (get-buffer-window
+		     (align-buffer-session-right-buffer session))))
+      (set-window-buffer follower elsewhere)
+      (align-buffer-integration--settle)
+      (align-buffer-integration--keys "C-n C-n")
+      (align-buffer-integration--expect
+       'a-window-off-screen "the session is still alive"
+       t (align-buffer-session-live-p session))
+      (align-buffer-integration--expect
+       'a-window-off-screen "and the other buffer was left alone"
+       elsewhere (window-buffer follower))
+      (align-buffer-quit session)
+      (kill-buffer elsewhere))))
+
+(align-buffer-integration-defscenario quitting-gives-the-window-back
   (let* ((session (align-buffer-integration--session))
-         (other (align-buffer-integration--other-window session))
-         (elsewhere (generate-new-buffer " *integration elsewhere*")))
-    (set-window-buffer other elsewhere)
-    (align-buffer-integration--settle)
-    (align-buffer-integration--keys "C-n C-n C-n")
-    (align-buffer-integration--expect
-     'a-pane-off-screen "the session survives with one pane shown"
-     t (and (align-buffer-session-live-p session) t))
-    (align-buffer-integration--expect
-     'a-pane-off-screen "and the other buffer was left alone"
-     elsewhere (window-buffer other))
+	 (left (align-buffer-session-left-buffer session))
+	 (right (align-buffer-session-right-buffer session)))
+    (align-buffer-integration--go session 'left 40)
     (align-buffer-quit session)
-    (kill-buffer elsewhere)))
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'quitting-gives-the-window-back "one window is left"
+     1 (length (window-list)))
+    (align-buffer-integration--expect
+     'quitting-gives-the-window-back "and both buffers are gone with the session"
+     '(nil nil) (list (buffer-live-p left) (buffer-live-p right)))))
+
+;;; Point past the bottom margin with the end of the buffer already on screen.
+;;; Passes with `settling-cap' undone as well: redisplay moves the leader here
+;;; whatever the prediction, and a leader that moves fires its scroll hook and
+;;; syncs again, so the error repairs itself.  The two tests on
+;;; `align-buffer--settling-correction' are what pin the fix.
+(align-buffer-integration-defscenario arriving-at-the-end-of-the-buffer
+  (let* ((session (align-buffer-integration--session))
+         (window (get-buffer-window (align-buffer-session-right-buffer session)))
+         (height (window-body-height window))
+         (margin (align-buffer-effective-margin window))
+         (last (with-current-buffer (window-buffer window)
+                 (line-number-at-pos (point-max) t))))
+    ;; The last line on the lowest row the margin allows, which is where a
+    ;; placement of this window leaves its point.  The end of the buffer is then
+    ;; one row further, so a press down breaches the margin with nothing below
+    ;; to clear it.
+    (align-buffer-integration--view session 'right
+                                    (- last (- height margin)) (1- last))
+    (align-buffer-integration--expect
+     'arriving-at-the-end-of-the-buffer "level on the last line"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-integration--keys "C-n")
+    (align-buffer-integration--expect
+     'arriving-at-the-end-of-the-buffer "level after pressing past it"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
+;;; Fails without counting rows by the motion that moves them (`row-count').  A
+;;; truncated line wider than the window reads as two rows to
+;;; `count-screen-lines' and one to `vertical-motion', so a long line between
+;;; the start and the anchor puts the follower a line out.
+(align-buffer-integration-defscenario a-long-line-above-the-anchor
+  (let ((session (align-buffer-integration--session)))
+    (align-buffer-integration--lengthen session 40)
+    ;; Centred, so line 40 lies between the start and point.
+    (align-buffer-integration--go session 'right 50)
+    (align-buffer-integration--keys "C-n")
+    (align-buffer-integration--expect
+     'a-long-line-above-the-anchor
+     "level with a long line above the anchor"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-integration--keys "C-n C-n")
+    (align-buffer-integration--expect
+     'a-long-line-above-the-anchor
+     "and still level two lines further on"
+     t (align-buffer-integration--level-p session))
+    (align-buffer-quit session)))
+
+;;; Fails without the room the point row needs (`point-row-room').  The pair
+;;; governing the right's unpaired run is its line 240, whose counterpart is the
+;;; LAST line of the left, so the follower is asked for a start with nothing
+;;; below it and a point the margin forbids.  Redisplay then scrolls the
+;;; follower, the follower reads as scrolled by the reader, and it leads.
+(align-buffer-integration-defscenario the-end-of-the-follower-does-not-lead
+  (let ((session (align-buffer-integration--session))
+	;; Recentring, which is what a window
+	;; whose margin is breached does on the
+	;; -Q default.
+	(scroll-conservatively 0))
+    (align-buffer-integration--go session 'right 241)
+    (dotimes (_ 30)
+      (align-buffer-integration--keys "C-n"))
+    (align-buffer-integration--expect
+     'the-end-of-the-follower-does-not-lead
+     "point is where the thirty motions put it"
+     271 (align-buffer-line-at
+	  (align-buffer-session-right-buffer session)
+	  (window-point
+	   (get-buffer-window
+	    (align-buffer-session-right-buffer session)))))
+    (align-buffer-quit session)))
 
 
 ;;; Running
@@ -418,46 +511,82 @@ momentarily is follows a viewport that is about to move."
 (defun align-buffer-integration-break (what)
   "Put back the behaviour WHAT replaced, so a scenario can be shown to catch it.
 
-A scenario that passes either way tests nothing, so each one names the change it
-covers and this is how that claim is checked.  Two of the fixes cannot be checked
-this way: the forced paint and the forced redisplay of the follower are both
-invisible to assertions on window state, which is the limit of this harness."
+A scenario that passes either way tests nothing, so each fix is named here and
+the run can be repeated with it undone.  Rule 1 has no entry: the target is
+worked out inside the placement itself and there is no cached row left to
+stale.
+
+Measured, one run per name.  Seven of the eleven are caught:
+
+  defer-timer               wheel-over-the-inactive-window,
+                            wheel-burst-over-the-inactive-window,
+                            one-notch-on-each-window
+  clamp-off-screen-anchor   an-unpaired-run-holds-the-follower
+  placed-flag               an-unpaired-run-holds-the-follower
+  clamp-floor               the-top-of-the-buffer-holds-its-point
+  can-lead                  a-transient-window-does-not-lead
+  point-row-room            the-end-of-the-follower-does-not-lead
+  row-count                 a-long-line-above-the-anchor
+
+And four are caught by nothing here:
+
+  settling-cap         the bug needs redisplay to leave the leader where it is
+                       despite point breaching the margin, which is what it
+                       does at the end of a buffer it already shows whole.
+                       Every geometry tried here recentres the leader instead,
+                       and a leader that moves syncs again off its own scroll
+                       hook, so the wrong prediction is repaired before it can
+                       be seen.  Observed in a live session on the demo, where
+                       the leader held still and the follower moved a row.
+                       Covered by `align-buffer-test-the-last-line-has-nothing-
+                       to-scroll-into' instead.
+
+  settling-correction  the bug needs redisplay's correction of the leader to
+                       arrive while we are inside our own sync, which happens
+                       only through the forced redisplay in `post-command-hook'.
+                       A scenario settling at top level is outside that guard,
+                       so the correction is simply followed.  Recorded against
+                       the same fix in the synthetic-pane version, where the
+                       evidence was a log from a live session.
+  note-point           a point-motion scroll whose window start is still stale
+                       when the command hook runs.  Not reached by this set.
+  window-big-enough    wants a window of one or two rows, which this harness
+                       has no way to lay out."
   (pcase what
-    ("settled-top"
-     (defun align-buffer--settled-top (window)
-       (align-buffer--viewport-row window)))
+    ("settling-correction"
+     (defun align-buffer--settling-correction (_window) 0))
+    ("clamp-off-screen-anchor"
+     ;; The unclamped reading, which lets a pair above the leader's top take a
+     ;; negative row and so drags the follower on by the height of the run.
+     (defun align-buffer--target (session side leader follower)
+       (let* ((leader-buffer (window-buffer leader))
+              (line (align-buffer-line-at leader-buffer (window-point leader)))
+              (anchor (and line (align-buffer-anchor session side line))))
+         (when anchor
+           (let* ((height (max 1 (window-body-height follower)))
+                  (own-position (align-buffer-line-position
+                                 leader-buffer (car anchor)))
+                  (other-position (align-buffer-line-position
+                                   (window-buffer follower) (cdr anchor)))
+                  (start (window-start leader))
+                  (rows (if (>= own-position start)
+                            (count-screen-lines start own-position nil leader)
+                          (- (count-screen-lines own-position start nil leader)))))
+             (when other-position
+               (cons other-position (min (1- height) rows))))))))
     ("defer-timer"
-     (defun align-buffer--defer-place (session window side row leader)
-       (setq align-buffer--pending-place (list session window side row leader))))
-    ("target-recompute"
-     (defun align-buffer--apply-pending-place ()
-       (when align-buffer--pending-place
-         (let* ((pending align-buffer--pending-place)
-                (session (nth 0 pending))
-                (window (nth 1 pending))
-                (side (nth 2 pending))
-                (row (nth 3 pending))
-                (leader (nth 4 pending)))
-           (setq align-buffer--pending-place nil)
-           (when align-buffer--pending-timer
-             (cancel-timer align-buffer--pending-timer)
-             (setq align-buffer--pending-timer nil))
-           (when (and (window-live-p window)
-                      (align-buffer-session-live-p session)
-                      (eq (window-buffer window)
-                          (align-buffer-buffer session side)))
-             (let ((align-buffer--syncing t))
-               (align-buffer--place-now session window side row leader)))))))
+     (defun align-buffer--defer-place (session window side leader)
+       (setq align-buffer--pending-place (list session window side leader))))
     ("note-point"
      (defun align-buffer--note-placed (window start _point)
        (set-window-parameter window 'align-buffer-placed (cons start nil))))
-    ("pane-window"
-     (defun align-buffer--pane-window-p (window) (window-live-p window)))
+    ("window-big-enough"
+     (defun align-buffer--window-big-enough-p (window) (window-live-p window)))
     ("clamp-floor"
-     (defun align-buffer--clamp-point-row (row top height margin limit)
-       (let ((lowest (+ top margin))
-             (highest (- (+ top height) margin 1)))
-         (max 0 (min limit (max lowest (min highest row)))))))
+     (defun align-buffer--clamp-point-row (row _start-at-beginning height margin)
+       (let ((lowest margin)
+             (highest (max 0 (- height margin 1))))
+         (max 0 (min (1- height) (max lowest (min highest row)))))))
     ("placed-flag"
      (defvar align-buffer-integration--flag nil)
      (defun align-buffer--note-placed (_window _start _point)
@@ -468,7 +597,39 @@ invisible to assertions on window state, which is the limit of this harness."
          t)))
     ("can-lead"
      (defun align-buffer--can-lead-p (window)
-       (align-buffer--pane-window-p window)))
+       (align-buffer--window-big-enough-p window)))
+    ("point-row-room"
+     (defun align-buffer--start-leaving-room (_window start _rows) start))
+    ("settling-cap"
+     ;; The correction as predicted, with no account of whether the window has
+     ;; anywhere to scroll.
+     (defun align-buffer--settling-correction (window)
+       (let* ((height (max 1 (window-body-height window)))
+              (margin (align-buffer-effective-margin window))
+              (point-row (align-buffer--rows-from-start
+                          window (window-point window)))
+              (highest (max 0 (- height margin 1)))
+              (at-beginning (with-current-buffer (window-buffer window)
+                              (= (window-start window) (point-min)))))
+         (cond ((null point-row) 0)
+               ((> point-row highest) (- point-row highest))
+               ((and (< point-row margin) (not at-beginning))
+                (- point-row margin))
+               (t 0)))))
+    ("row-count"
+     ;; Rows counted by `count-screen-lines' while they are walked by
+     ;; `vertical-motion', which disagree over a truncated long line.
+     (defun align-buffer--rows-from-start (window position)
+       (let ((start (window-start window))
+             (height (max 1 (window-body-height window))))
+         (when (>= position start)
+           (let ((bound (car (align-buffer--position-rows-below
+                              window start height))))
+             (when (or (<= position bound)
+                       (= bound (with-current-buffer (window-buffer window)
+                                  (point-max))))
+               (min (1- height)
+                    (count-screen-lines start position nil window))))))))
     (_ (error "Nothing called %s to break" what))))
 
 (defun align-buffer-integration-run ()
@@ -484,7 +645,11 @@ invisible to assertions on window state, which is the limit of this harness."
                  (message "align-buffer integration: %s" name))
         (error (push (format "%s: signalled %s" name
                              (error-message-string error))
-                     align-buffer-integration--failures)))))
+                     align-buffer-integration--failures)))
+      ;; A scenario that failed part way can leave a session standing, and the
+      ;; next one starts by deleting windows.
+      (dolist (session (align-buffer-sessions))
+        (align-buffer-quit session))))
   align-buffer-integration--failures)
 
 (defun align-buffer-integration--report-file ()
@@ -501,7 +666,7 @@ invisible to assertions on window state, which is the limit of this harness."
   "Run the scenarios, write the report, and exit with a status."
   (let ((file (align-buffer-integration--report-file)))
     (run-with-timer
-     120 nil
+     180 nil
      (lambda ()
        (align-buffer-integration--write file '("TIMED OUT"))
        (kill-emacs 2)))
