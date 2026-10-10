@@ -17,8 +17,18 @@
 ;; can be anywhere in its buffer.  Crossing into a moved block makes it jump,
 ;; which is the whole point of allowing it.
 ;;
-;; Everything is counted in SCREEN rows, not buffer lines, so a soft-wrapped
-;; line takes the room it actually takes and the anchor still lands level.
+;; Everything is measured in PIXELS, not buffer lines and not rows.  A line
+;; takes the room the display gives it: wrapped over several rows, carrying rows
+;; an overlay hangs above it, or taller than its neighbours because of its face.
+;; None of that is visible to a count of lines, and a count of rows only works
+;; while every row is worth the same.
+;;
+;; What we can ask of a window is coarser than what we can measure of it,
+;; though, since a window start is a buffer position and so always a row
+;; boundary.  The pixel asked for therefore often falls inside a row, and the
+;; nearer boundary is taken.  Closing that gap needs `set-window-vscroll', and
+;; redisplay drops a vscroll we set on the following cycle, so the last few
+;; pixels are not on offer.
 ;;
 ;; FIVE RULES.  Every bug found in the synthetic-pane version of this file was
 ;; a breach of one of them, and they hold unchanged here:
@@ -36,7 +46,9 @@
 ;;
 ;; 3. Setting a window start is what asks for that window to be painted.  Skip
 ;;    the write as redundant and the paint is skipped with it, so the paint is
-;;    asked for explicitly instead.
+;;    asked for explicitly instead.  And asking from inside redisplay asks
+;;    during the cycle already running, which honours nothing and schedules
+;;    nothing, so a window moved there is marked again from a timer.
 ;;
 ;; 4. A window we placed is not a scroll to follow.  Moving the follower scrolls
 ;;    it, which fires both hooks for it, and leading from that would undo what
@@ -71,6 +83,12 @@ buffer, so whatever is drawn from its point is brought up to date from here.")
 (defvar align-buffer--pending-place nil
   "A queued placement, as (SESSION WINDOW SIDE LEADER).")
 
+(defvar align-buffer--pending-paint nil
+  "Windows we have moved whose pixels are waiting for a redisplay.")
+
+(defvar align-buffer--paint-timer nil
+  "The one-shot timer set to ask for a queued paint.")
+
 (defvar-local align-buffer--last-start nil
   "Window start this buffer's window had when we last looked.")
 
@@ -89,14 +107,19 @@ buffer, so whatever is drawn from its point is brought up to date from here.")
   "Return the height in pixels of WINDOW's text from FROM to TO."
   (cdr (window-text-pixel-size window (min from to) (max from to))))
 
-(defun align-buffer--rows-between (window from to)
-  "Return the screen rows between FROM and TO in WINDOW, as displayed."
-  ;; Measured in pixels, because rows are what the display makes of the text
-  ;; and not what the text is: an overlay's `before-string' is rows that
-  ;; `vertical-motion' walks straight past, and a line wider than the window is
-  ;; rows that depend on how it is wrapped.
-  (round (align-buffer--pixels-between window from to)
-         (align-buffer--row-height window)))
+(defun align-buffer--rows-apart (window from to)
+  "Return how many screen rows WINDOW puts between FROM and TO, FROM above TO.
+Walked, and no further than the window is tall."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char from)
+      (let ((rows 0)
+            (height (max 1 (window-body-height window))))
+        (while (and (< (point) to)
+                    (< rows height)
+                    (not (zerop (vertical-motion 1 window))))
+          (setq rows (1+ rows)))
+        rows))))
 
 (defun align-buffer--rows-from-start (window position)
   "Return the screen row POSITION sits on in WINDOW, or nil when it is above.
@@ -116,68 +139,60 @@ covers at most a windowful."
 
 (defun align-buffer--position-rows-below (window from rows)
   "Return the position ROWS screen rows below FROM in WINDOW, ROWS up when it
-is negative.  Also how many rows that turned out to be, as (POSITION . ROWS).
+is negative.  Also how many rows that turned out to be, as (POSITION . ROWS),
+which is fewer against either end of the buffer."
+  ;; Walked rather than measured, because this is the margin's arithmetic and
+  ;; not the alignment's: `vertical-motion' counts a wrapped line's rows and a
+  ;; line drawn taller than its neighbours as the one row it is, and it is only
+  ;; the rows an overlay adds that it walks past without counting.  Being a row
+  ;; out about those costs a point placed a row nearer an edge than we meant,
+  ;; where measuring instead would cost a pixel reading of the whole span on
+  ;; every step of every placement.
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char from)
+      (let ((moved (vertical-motion rows window)))
+        (cons (point) moved)))))
 
-Fewer against either end of the buffer, and a row out where rows and positions
-do not line up: an overlay's rows belong to the position its line begins at, so
-stepping onto that line steps over them all at once."
-  (let ((step (if (< rows 0) -1 1))
-        (target (abs rows)))
-    (with-current-buffer (window-buffer window)
-      (save-excursion
-        (goto-char from)
-        (let ((moved 0)
-              (done (zerop rows)))
-          (while (not done)
-            (let ((before (point)))
-              (if (zerop (vertical-motion step window))
-                  (setq done t)
-                ;; Measured from FROM every time.  A step can land inside a
-                ;; wrapped line, and measuring from there covers what is left
-                ;; of that line rather than the row it sits on, so adding the
-                ;; steps up comes to a row more than the span is worth.
-                (let ((got (align-buffer--rows-between window from (point))))
-                  (cond ((<= got target) (setq moved got))
-                        (t
-                         ;; Past what was asked, so we keep whichever of the
-                         ;; two is nearer to it.
-                         (if (< (- got target) (- target moved))
-                             (setq moved got)
-                           (goto-char before))
-                         (setq done t)))))))
-          (cons (point) (* step moved)))))))
+(defun align-buffer--start-for-pixels (window position pixels)
+  "Return a start for WINDOW that puts POSITION as near PIXELS below its top as
+a start can, and how far below that comes to, as (START . PIXELS).
 
-(defun align-buffer--start-for-rows (window position rows)
-  "Return a start for WINDOW that puts POSITION ROWS rows below its top.
-Also the rows it comes to, as (START . ROWS).
-
-A start is a position, which is coarser than a row: where an overlay hangs rows
-above a line, no start puts that line's own row at the top, and the rows asked
-for may fall between two starts.  The nearer start is taken."
-  (if (<= rows 0)
+A start is a position and a position is a row boundary, so the pixel asked for
+usually falls inside a row and the nearer boundary is taken.  Covering the rest
+would need a vscroll, which redisplay drops again on the next cycle."
+  (if (<= pixels 0)
       (cons position 0)
     (with-current-buffer (window-buffer window)
       (save-excursion
-        (goto-char position)
-        (let ((best position)
-              (best-rows 0)
-              (done nil))
-          (while (not done)
-            (if (zerop (vertical-motion -1 window))
-                (setq done t)
-              ;; Measured from the candidate to POSITION every time, which is
-              ;; what the window will show when it starts there.
-              (let ((got (align-buffer--rows-between window (point) position)))
-                (cond ((<= got rows)
-                       (setq best (point))
-                       (setq best-rows got)
-                       (when (= got rows) (setq done t)))
-                      (t
-                       (when (< (- got rows) (- rows best-rows))
-                         (setq best (point))
-                         (setq best-rows got))
-                       (setq done t))))))
-          (cons best best-rows))))))
+        ;; A guess at the usual row height, which is already the answer
+        ;; wherever every row between the two is worth it, and a row or two out
+        ;; where one is not.
+        (goto-char (car (align-buffer--position-rows-below
+                         window position
+                         (- (round pixels (align-buffer--row-height window))))))
+        (let* ((best (point))
+               (best-pixels (align-buffer--pixels-between
+                             window (point) position)))
+          (unless (= best-pixels pixels)
+            ;; Towards the pixel asked for, one row at a time, stopping as soon
+            ;; as we are past it: further on only gets worse.
+            (let ((step (if (< best-pixels pixels) -1 1))
+                  (best-out (abs (- best-pixels pixels)))
+                  (done nil))
+              (while (not done)
+                (if (zerop (vertical-motion step window))
+                    (setq done t)
+                  (let* ((got (align-buffer--pixels-between
+                               window (point) position))
+                         (out (abs (- got pixels))))
+                    (when (< out best-out)
+                      (setq best (point))
+                      (setq best-pixels got)
+                      (setq best-out out))
+                    (when (if (< step 0) (>= got pixels) (<= got pixels))
+                      (setq done t)))))))
+          (cons best best-pixels))))))
 
 (defun align-buffer--rows-below-window (window wanted)
   "Return how many of WANTED screen rows sit below WINDOW's last row."
@@ -217,39 +232,49 @@ Positive scrolls forward."
              (- (min wanted (align-buffer--rows-above-window window wanted)))))
           (t 0))))
 
-(defun align-buffer--leader-row (window position)
-  "Return the screen row POSITION will sit on in WINDOW once redisplay settles.
-Zero when it is above the window's start: a pair scrolled off the top holds the
-other window where it is rather than dragging it further."
-  (let ((row (align-buffer--rows-from-start window position)))
-    (if (null row)
+(defun align-buffer--leader-pixels (window position)
+  "Return how far below WINDOW's top POSITION sits once redisplay settles.
+In pixels, since a row is only worth its own height and two windows share
+neither their rows nor the heights of them.  Zero when POSITION is above the
+start, which is what holds the other window still rather than dragging it on."
+  (let* ((start (window-start window))
+         (height (max 1 (window-body-height window)))
+         (row-height (align-buffer--row-height window)))
+    (if (< position start)
         0
-      (max 0 (- row (align-buffer--settling-correction window))))))
+      (let ((pixels (cdr (window-text-pixel-size
+                          window start position nil
+                          (* (1+ height) row-height)))))
+        (max 0 (- pixels (* (align-buffer--settling-correction window)
+                            row-height)))))))
 
 
 ;;; What the follower has to show
 
 (defun align-buffer--target (session side leader follower)
   "Return what FOLLOWER must show to sit level with LEADER, which shows SIDE.
-As (POSITION . ROWS): the counterpart line's position and the screen row it
-belongs on.  Nil when the correspondence says nothing about the line point is
-on in LEADER."
+As (POSITION . PIXELS): the counterpart line's position and how far below the
+window's top it belongs.  Nil when the correspondence says nothing about the
+line point is on in LEADER."
   (let* ((leader-buffer (window-buffer leader))
          (line (align-buffer-line-at leader-buffer (window-point leader)))
          (anchor (and line (align-buffer-anchor session side line))))
     (when anchor
       (let* ((height (max 1 (window-body-height follower)))
+             (row-height (align-buffer--row-height follower))
              (other-position (align-buffer-line-position
                               (window-buffer follower) (cdr anchor)))
-             (rows (if (> (car anchor) line)
-                       ;; Point sits above every pair, so we show the first
-                       ;; counterpart at the top and wait for point to reach it.
-                       0
-                     (align-buffer--leader-row
-                      leader
-                      (align-buffer-line-position leader-buffer (car anchor))))))
+             (pixels (if (> (car anchor) line)
+                         ;; Point sits above every pair, so we show the first
+                         ;; counterpart at the top and wait for point to reach
+                         ;; it.
+                         0
+                       (align-buffer--leader-pixels
+                        leader
+                        (align-buffer-line-position leader-buffer (car anchor))))))
         (when other-position
-          (cons other-position (max 0 (min (1- height) rows))))))))
+          (cons other-position
+                (max 0 (min (* (1- height) row-height) pixels))))))))
 
 
 ;;; Whose scroll is it
@@ -305,6 +330,15 @@ MARGIN rows stay clear at each edge of a HEIGHT-row window."
     ;; outside the window would be worse than one inside a margin.
     (max 0 (min (1- height) wanted))))
 
+(defun align-buffer--follower-point (window start counterpart row point-row)
+  "Return the point to give WINDOW, which begins at START.
+COUNTERPART itself when the margin leaves it on the ROW it already sits on,
+since that is the line being read; otherwise the position POINT-ROW rows below
+START, which is as near to it as the margin allows."
+  (if (and row (= row point-row))
+      counterpart
+    (car (align-buffer--position-rows-below window start point-row))))
+
 (defun align-buffer--start-leaving-room (window start rows)
   "Return START, moved back far enough that ROWS screen rows fit below it.
 The end of the buffer leaves fewer, and then the row we wanted for the anchor
@@ -317,6 +351,23 @@ redisplay scrolls the window and takes our placement with it."
       (car (align-buffer--position-rows-below
             window start (- available rows))))))
 
+(defun align-buffer--defer-paint (window)
+  "Ask for WINDOW to be painted once the command loop is free."
+  (unless (memq window align-buffer--pending-paint)
+    (push window align-buffer--pending-paint))
+  (unless align-buffer--paint-timer
+    (setq align-buffer--paint-timer
+          (run-with-timer 0 nil #'align-buffer--flush-pending-paint))))
+
+(defun align-buffer--flush-pending-paint ()
+  "Mark the windows waiting for a paint, from the timer set for them."
+  (setq align-buffer--paint-timer nil)
+  (let ((windows align-buffer--pending-paint))
+    (setq align-buffer--pending-paint nil)
+    (dolist (window windows)
+      (when (window-live-p window)
+        (force-window-update window)))))
+
 (defun align-buffer--place (session window side leader)
   "Place WINDOW, which shows SIDE of SESSION, level with LEADER."
   ;; Rule 5.  A placement of the SELECTED window cannot be done from inside
@@ -328,7 +379,15 @@ redisplay scrolls the window and takes our placement with it."
   ;; ordinary redisplay paints what we marked.
   (if (and align-buffer--in-redisplay (eq window (selected-window)))
       (progn (align-buffer--defer-place session window side leader) nil)
-    (align-buffer--place-now session window side leader)))
+    (let ((moved (align-buffer--place-now session window side leader)))
+      ;; Rule 3 again, from the other end.  A paint asked for from inside
+      ;; redisplay is asked for during the cycle already running, so the mark is
+      ;; not honoured and nothing schedules another one: the window sits where
+      ;; we put it while the screen goes on showing where it was.  The timer
+      ;; marks it with the command loop free, where it is painted.
+      (when (and moved align-buffer--in-redisplay)
+        (align-buffer--defer-paint window))
+      moved)))
 
 (defun align-buffer--place-now (session window side leader)
   "Place WINDOW, which shows SIDE of SESSION, level with LEADER.
@@ -337,19 +396,25 @@ Return non-nil when it moved, and nil when it was already there."
                  session (align-buffer-other-side side) leader window)))
     (when target
       (pcase-let*
-          ((`(,counterpart . ,rows) target)
-           (`(,wanted . ,achieved)
-            (align-buffer--start-for-rows window counterpart rows))
+          ((`(,counterpart . ,pixels) target)
+           (`(,wanted . ,_)
+            (align-buffer--start-for-pixels window counterpart pixels))
            (buffer (window-buffer window))
            (height (max 1 (window-body-height window)))
            (margin (align-buffer-effective-margin window))
+           ;; The row the counterpart lands on, walked rather than worked out
+           ;; from the pixels: a line drawn taller than a row is still one row,
+           ;; and dividing its height by the usual one puts point most of a row
+           ;; further down for every tall line above it.
+           (row (align-buffer--rows-apart window wanted counterpart))
            (point-row (align-buffer--clamp-point-row
-                       achieved
+                       row
                        (with-current-buffer buffer (= wanted (point-min)))
                        height margin))
            (start (align-buffer--start-leaving-room window wanted point-row))
-           (point (car (align-buffer--position-rows-below
-                        window start point-row))))
+           (point (align-buffer--follower-point
+                   window start counterpart
+                   (and (= start wanted) row) point-row)))
         ;; A buffer the reader has narrowed cannot be shown from outside the
         ;; part they left accessible, so we leave such a window alone rather
         ;; than writing a start redisplay would have to undo.

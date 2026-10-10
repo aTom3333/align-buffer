@@ -28,6 +28,10 @@
 ;; A few lines carry a note above them, hung on an overlay the way a checker or
 ;; a blame header hangs one.  Those rows are display and not text, they are on
 ;; one side only, and no position in the buffer stands anywhere inside them.
+;;
+;; And some lines are drawn taller than a row, the way an org heading is: eight
+;; of them taller on both sides, four taller on the new side only.  A row is
+;; then not even worth the same on the two sides.
 
 ;;; Code:
 
@@ -49,6 +53,15 @@
 (defconst align-buffer-demo--shrunk-base 5000
   "Identities above this are long on the old side and short on the new.")
 
+(defconst align-buffer-demo--heading-base 6000
+  "Identities above this are drawn taller than a line on both sides.")
+
+(defconst align-buffer-demo--promoted-base 6100
+  "Identities above this are drawn taller than a line on the new side only.")
+
+(defconst align-buffer-demo--heading-height 1.8
+  "How many times the usual height a heading line is drawn at.")
+
 (defun align-buffer-demo--long-tail (words)
   "Return a comment long enough to take WORDS words of a screen row."
   (concat " // " (mapconcat #'identity (make-list words "and so on") " ")))
@@ -59,6 +72,12 @@ A line paired across the two sides reads the same on both, save for the changed
 ones, which keep their name and differ in length so that one side wraps where
 the other does not."
   (cond
+   ((> id align-buffer-demo--promoted-base)
+    (format "\t// taller on the new side, %d"
+            (- id align-buffer-demo--promoted-base)))
+   ((> id align-buffer-demo--heading-base)
+    (format "\t// a heading, taller on both sides, %d"
+            (- id align-buffer-demo--heading-base)))
    ((> id align-buffer-demo--shrunk-base)
     (let ((number (- id align-buffer-demo--shrunk-base)))
       (format "\tchanged_shrunk(%d);%s" number
@@ -80,11 +99,20 @@ the other does not."
    (t
     (format "\tcall_shared(%d);" id))))
 
+(defun align-buffer-demo--face (id side)
+  "Return the face SIDE draws the line called ID with, or nil for the usual one."
+  (let ((height (list :height align-buffer-demo--heading-height)))
+    (cond ((> id align-buffer-demo--promoted-base)
+           (and (eq side 'right) height))
+          ((> id align-buffer-demo--heading-base) height))))
+
 (defun align-buffer-demo--old-ids ()
   "Return the identities of the old side's lines, in order."
   (append (number-sequence 1 80)
           (number-sequence 1001 1040)
           (number-sequence 81 120)
+          (number-sequence 6001 6008)
+          (number-sequence 6101 6104)
           (number-sequence 4001 4010)
           (number-sequence 5001 5010)
           (number-sequence 121 140)
@@ -96,6 +124,8 @@ the other does not."
   "Return the identities of the new side's lines, in order."
   (append (number-sequence 1 80)
           (number-sequence 81 120)
+          (number-sequence 6001 6008)
+          (number-sequence 6101 6104)
           (number-sequence 4001 4010)
           (number-sequence 5001 5010)
           (number-sequence 121 140)
@@ -149,7 +179,11 @@ there: rows of the display that are no part of the text."
         (erase-buffer)
         (remove-overlays)
         (dolist (id ids)
-          (insert (align-buffer-demo--text id side) "\n")))
+          (let ((from (point))
+                (face (align-buffer-demo--face id side)))
+            (insert (align-buffer-demo--text id side) "\n")
+            (when face
+              (overlay-put (make-overlay from (point)) 'face face)))))
       (delay-mode-hooks (funcall mode))
       (font-lock-mode 1)
       (display-line-numbers-mode 1)

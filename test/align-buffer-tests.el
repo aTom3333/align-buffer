@@ -61,6 +61,14 @@ display that no position in the buffer stands inside."
                               ""))
       overlay)))
 
+(defun align-buffer-tests--heighten (buffer line scale)
+  "Have LINE of BUFFER drawn SCALE times the usual height, as a heading is."
+  (with-current-buffer buffer
+    (let ((overlay (make-overlay (align-buffer-line-position buffer line)
+                                 (align-buffer-line-position buffer (1+ line)))))
+      (overlay-put overlay 'face (list :height scale))
+      overlay)))
+
 (defun align-buffer-tests--last-line (buffer)
   "Return the number of BUFFER's last line."
   (with-current-buffer buffer
@@ -246,19 +254,43 @@ position below it is one a walk of that many rows reaches."
                         window (align-buffer-line-position buffer 55))
                        (+ before 2)))))))
 
-(ert-deftest align-buffer-test-a-start-promises-the-rows-it-gives ()
-  "Whatever start comes back, the rows it is said to give are the rows it gives."
+(ert-deftest align-buffer-test-a-start-promises-the-pixels-it-gives ()
+  "Whatever start comes back, the pixels it is said to give are what it gives."
   (align-buffer-tests--with-session '((1 . 1))
     (let* ((window (align-buffer-tests--window session 'left))
            (buffer (window-buffer window)))
       (align-buffer-tests--note buffer 52 2)
       (align-buffer-tests--view session 'left 50)
       (let ((position (align-buffer-line-position buffer 60)))
-        (dolist (rows (number-sequence 0 12))
+        (dolist (pixels (number-sequence 0 140 7))
           (pcase-let ((`(,start . ,given)
-                       (align-buffer--start-for-rows window position rows)))
-            (should (equal given (align-buffer--rows-between
+                       (align-buffer--start-for-pixels window position pixels)))
+            (should (equal given (align-buffer--pixels-between
                                   window start position)))))))))
+
+(ert-deftest align-buffer-test-a-start-is-the-nearest-one-on-offer ()
+  "Neither of the starts either side of the one chosen is nearer the pixel."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window)))
+      (align-buffer-tests--note buffer 52 2)
+      (align-buffer-tests--view session 'left 50)
+      (let ((position (align-buffer-line-position buffer 60)))
+        (dolist (pixels (number-sequence 0 140 3))
+          (pcase-let* ((`(,start . ,given)
+                        (align-buffer--start-for-pixels window position pixels))
+                       (out (abs (- given pixels)))
+                       (above (car (align-buffer--position-rows-below
+                                    window start -1)))
+                       (below (car (align-buffer--position-rows-below
+                                    window start 1))))
+            (should (<= out (abs (- (align-buffer--pixels-between
+                                     window above position)
+                                    pixels))))
+            (when (< below position)
+              (should (<= out (abs (- (align-buffer--pixels-between
+                                       window below position)
+                                      pixels)))))))))))
 
 (ert-deftest align-buffer-test-a-settled-viewport-needs-no-correction ()
   "Point well inside the window is a window redisplay will leave alone."
@@ -545,6 +577,43 @@ line that had one, rather than scrolling it past content that answers nothing."
     (should (buffer-live-p left))
     (dolist (buffer (list left right))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest align-buffer-test-the-follower-point-lands-on-the-pair ()
+  "The point the follower is given is the pair's own line, tall lines or not."
+  (align-buffer-tests--with-session '((20 . 20) (30 . 30))
+    (let* ((follower (align-buffer-tests--window session 'right))
+           (buffer (window-buffer follower)))
+      ;; Drawn taller than a row, and above the line the follower has to show.
+      (align-buffer-tests--heighten buffer 25 2.0)
+      (align-buffer-tests--view session 'left 20 30)
+      (align-buffer-sync (align-buffer-tests--window session 'left))
+      (should (equal (align-buffer-line-at buffer (window-point follower)) 30)))))
+
+(ert-deftest align-buffer-test-a-placement-inside-redisplay-asks-for-a-paint ()
+  "A window moved from inside redisplay is marked again once we are out of it,
+since the mark we make in there is honoured by nothing."
+  (align-buffer-tests--with-session '((1 . 1) (40 . 40))
+    (let ((follower (align-buffer-tests--window session 'right))
+          (align-buffer--pending-paint nil)
+          (align-buffer--paint-timer nil))
+      (align-buffer-tests--view session 'left 20 40)
+      (let ((align-buffer--in-redisplay t))
+        (should (align-buffer--place session follower 'right
+                                     (align-buffer-tests--window session 'left)))
+        (should (memq follower align-buffer--pending-paint)))
+      (when align-buffer--paint-timer
+        (cancel-timer align-buffer--paint-timer)))))
+
+(ert-deftest align-buffer-test-a-placement-outside-redisplay-needs-no-paint ()
+  "Out of redisplay the paint we ask for lands, so nothing is queued."
+  (align-buffer-tests--with-session '((1 . 1) (40 . 40))
+    (let ((follower (align-buffer-tests--window session 'right))
+          (align-buffer--pending-paint nil)
+          (align-buffer--paint-timer nil))
+      (align-buffer-tests--view session 'left 20 40)
+      (should (align-buffer--place session follower 'right
+                                   (align-buffer-tests--window session 'left)))
+      (should-not align-buffer--pending-paint))))
 
 (ert-deftest align-buffer-test-the-post-place-hook-runs-on-a-placement ()
   "A placement that moved the window says so, naming the window and its side."
