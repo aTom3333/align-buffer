@@ -164,6 +164,26 @@ Where several pairs share one OWN, the last one given decides."
 
 ;;; Lines and positions
 
+(defvar-local align-buffer--line-cache nil
+  "Where a line was last found in this buffer, as (MARKER LINE TICK).")
+
+(defun align-buffer--line-known ()
+  "Return a line we know the place of, as (POSITION . LINE), or nil.
+Nil once the buffer's text has changed, since a marker keeps its place in the
+text while the line numbering around it moves."
+  (pcase align-buffer--line-cache
+    (`(,marker ,line ,tick)
+     (and (eq tick (buffer-chars-modified-tick))
+          (marker-position marker)
+          (cons (marker-position marker) line)))))
+
+(defun align-buffer--line-remember (position line)
+  "Remember that LINE begins at POSITION."
+  (let ((marker (or (car align-buffer--line-cache) (make-marker))))
+    (set-marker marker position)
+    (setq align-buffer--line-cache
+          (list marker line (buffer-chars-modified-tick)))))
+
 (defun align-buffer-line-position (buffer line)
   "Return where LINE begins in BUFFER, counting from one and ignoring narrowing.
 A LINE past the end gives the last line, so a correspondence left stale by an
@@ -173,15 +193,53 @@ edit still places the window somewhere rather than failing."
       (save-restriction
         (widen)
         (save-excursion
-          (goto-char (point-min))
-          (forward-line (1- (max 1 line)))
-          (point))))))
+          ;; Walked from the line we found last, which is a few lines away
+          ;; while the reader scrolls, rather than from the first line, which
+          ;; is as far away as they have read.
+          (let* ((wanted (max 1 line))
+                 (known (align-buffer--line-known))
+                 (left (if known
+                           (progn (goto-char (car known))
+                                  (forward-line (- wanted (cdr known))))
+                         (goto-char (point-min))
+                         (forward-line (1- wanted)))))
+            (when (zerop left)
+              (align-buffer--line-remember (point) wanted))
+            (point)))))))
 
 (defun align-buffer-line-at (buffer position)
   "Return the line number of POSITION in BUFFER, ignoring narrowing."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (line-number-at-pos position t))))
+      (let ((known (align-buffer--line-known)))
+        (if (null known)
+            (line-number-at-pos position t)
+          ;; Counted from the line we found last, which is near, rather than
+          ;; from the first line, which is as far as the reader has read.
+          (save-restriction
+            (widen)
+            (align-buffer--line-from known position)))))))
+
+(defun align-buffer--line-from (known position)
+  "Return the line POSITION is on, given KNOWN as (POSITION . LINE)."
+  (pcase-let ((`(,from . ,line) known))
+    (cond
+     ((= position from) line)
+     ((> position from)
+      ;; `count-lines' counts the line POSITION sits in as well, unless it sits
+      ;; at the start of one.
+      (let ((lines (count-lines from position)))
+        (+ line (if (align-buffer--line-start-p position) lines (1- lines)))))
+     (t
+      ;; Counting back to a position part way along a line counts whole lines
+      ;; either way, since the end of the span is a line start.
+      (- line (count-lines position from))))))
+
+(defun align-buffer--line-start-p (position)
+  "Return non-nil when POSITION is where a line begins."
+  (save-excursion
+    (goto-char position)
+    (bolp)))
 
 
 ;;; Windows

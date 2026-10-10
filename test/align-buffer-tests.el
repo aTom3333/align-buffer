@@ -221,6 +221,52 @@ keeps the count from walking a whole buffer."
     (align-buffer-tests--view session 'left 1)
     (should-not (align-buffer-tests--row-of session 'left 180))))
 
+(defun align-buffer-tests--line-start (buffer line)
+  "Return where LINE begins in BUFFER, counted from the first line every time."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (point))))
+
+(ert-deftest align-buffer-test-a-line-is-found-wherever-we-looked-last ()
+  "Lines asked for in any order come back where counting from the top puts them."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let ((buffer (align-buffer-buffer session 'left)))
+      ;; Forwards, backwards, by one and by a hundred, and twice over.
+      (dolist (line '(1 10 100 50 51 50 2 100 100 1 199))
+        (should (equal (align-buffer-line-position buffer line)
+                       (align-buffer-tests--line-start buffer line)))))))
+
+(ert-deftest align-buffer-test-a-position-names-the-line-it-is-on ()
+  "Positions asked for in any order come back with the line `line-number-at-pos'
+puts them on, whether they sit at the start of a line or part way along."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let ((buffer (align-buffer-buffer session 'left)))
+      (dolist (line '(1 10 100 50 51 50 2 100 1 199))
+        (let ((start (align-buffer-tests--line-start buffer line)))
+          ;; Looking the line up is what leaves a place behind to count from.
+          (align-buffer-line-position buffer line)
+          (dolist (position (list start (+ start 1) (+ start 3)
+                                  (align-buffer-tests--line-start buffer 80)
+                                  (+ 2 (align-buffer-tests--line-start buffer 80))
+                                  (align-buffer-tests--line-start buffer 20)))
+            (should (equal (align-buffer-line-at buffer position)
+                           (with-current-buffer buffer
+                             (line-number-at-pos position t))))))))))
+
+(ert-deftest align-buffer-test-a-line-is-found-again-after-an-edit ()
+  "What we remember of a line is dropped once the text moves under it."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let ((buffer (align-buffer-buffer session 'left)))
+      (align-buffer-line-position buffer 50)
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char (point-min))
+          (insert "a line that was not there before\n")))
+      (should (equal (align-buffer-line-position buffer 50)
+                     (align-buffer-tests--line-start buffer 50))))))
+
 (ert-deftest align-buffer-test-a-row-is-counted-the-way-it-is-walked ()
   "A truncated line wider than the window takes one row, and the row of a
 position below it is one a walk of that many rows reaches."

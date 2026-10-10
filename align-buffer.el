@@ -66,7 +66,8 @@ Carries the sync and the session this buffer belongs to.  Set up by
     (align-buffer-sync-disable)
     (remove-hook 'kill-buffer-hook #'align-buffer--buffer-killed t)
     (kill-local-variable 'align-buffer--session)
-    (kill-local-variable 'align-buffer--side))))
+    (kill-local-variable 'align-buffer--side)
+    (kill-local-variable 'align-buffer--line-cache))))
 
 
 ;;; Layout
