@@ -28,6 +28,10 @@
 ;; A few lines carry a note above them, hung on an overlay the way a checker or
 ;; a blame header hangs one.  Those rows are display and not text, they are on
 ;; one side only, and no position in the buffer stands anywhere inside them.
+;; Two of the notes are blocks of tens of rows, each where the other side has
+;; nothing of the kind.  One sits in the middle of the long stretch the two
+;; sides share, where nothing else is happening; the other is taller than the
+;; window.
 ;;
 ;; And some lines are drawn taller than a row, the way an org heading is: eight
 ;; of them taller on both sides, four taller on the new side only.  A row is
@@ -135,7 +139,14 @@ the other does not."
           (number-sequence 171 200)))
 
 (defconst align-buffer-demo--notes
-  '((left 40 1) (right 90 2) (left 165 1) (right 135 2) (left 275 3))
+  '((right 90 2) (left 165 1) (right 135 2) (left 275 3)
+    ;; A block of forty rows in the middle of the first eighty lines, which are
+    ;; the same on both sides and paired one to one.  Nothing else is going on
+    ;; there, so what the block alone does to the alignment can be watched.
+    (left 50 40)
+    ;; And one taller than a window, in the run only the new side has, so the
+    ;; whole viewport can end up inside rows that no position stands in.
+    (right 250 80))
   "Where to hang a note, as (SIDE LINE ROWS).
 ROWS screen rows of it sit above LINE, on SIDE only, so those rows belong to
 one window and have no counterpart in the other.")
@@ -193,6 +204,10 @@ there: rows of the display that are no part of the text."
       ;; Five rows kept clear at each edge, which is what redisplay fights the
       ;; sync over when the facing buffer runs out of lines.
       (setq-local scroll-margin 5)
+      ;; A screen line at a time, which moves the window without moving point
+      ;; and so drives the sync from the other end than the arrow keys do.
+      (local-set-key (kbd "M-<down>") #'scroll-up-line)
+      (local-set-key (kbd "M-<up>") #'scroll-down-line)
       (set-buffer-modified-p nil)
       (goto-char (point-min)))
     buffer))

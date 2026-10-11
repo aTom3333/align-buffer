@@ -300,32 +300,88 @@ position below it is one a walk of that many rows reaches."
                         window (align-buffer-line-position buffer 55))
                        (+ before 2)))))))
 
-(ert-deftest align-buffer-test-a-start-promises-the-pixels-it-gives ()
-  "Whatever start comes back, the pixels it is said to give are what it gives."
+(ert-deftest align-buffer-test-a-start-and-its-lift-land-on-the-pixel ()
+  "The start and the vscroll with it put the position exactly where asked."
   (align-buffer-tests--with-session '((1 . 1))
     (let* ((window (align-buffer-tests--window session 'left))
-           (buffer (window-buffer window)))
+           (buffer (window-buffer window))
+           (align-buffer-exact-alignment t)
+           (beginning (with-current-buffer buffer (point-min))))
       (align-buffer-tests--note buffer 52 2)
       (align-buffer-tests--view session 'left 50)
       (let ((position (align-buffer-line-position buffer 60)))
         (dolist (pixels (number-sequence 0 140 7))
-          (pcase-let ((`(,start . ,given)
-                       (align-buffer--start-for-pixels window position pixels)))
-            (should (equal given (align-buffer--pixels-between
-                                  window start position)))))))))
+          (pcase-let* ((`(,start . ,vscroll)
+                        (align-buffer--start-for-pixels window position pixels))
+                       (given (- (align-buffer--pixels-between
+                                  window start position)
+                                 vscroll)))
+            ;; Exactly the pixel, unless the buffer ran out above it.
+            (should (or (equal given pixels)
+                        (and (= start beginning) (< given pixels))))))))))
 
-(ert-deftest align-buffer-test-a-start-is-the-nearest-one-on-offer ()
-  "Neither of the starts either side of the one chosen is nearer the pixel."
+(ert-deftest align-buffer-test-a-start-never-walks-below-the-line ()
+  "A start stays above the line it is placing, however big the note above it.
+A span is measured between two places whichever way round they are, so a
+candidate below the line reads as a span again and the walk would carry on to
+the end of the buffer."
   (align-buffer-tests--with-session '((1 . 1))
     (let* ((window (align-buffer-tests--window session 'left))
-           (buffer (window-buffer window)))
+           (buffer (window-buffer window))
+           (align-buffer-exact-alignment t))
+      ;; Far more rows than the target asks for, so every candidate below the
+      ;; line measures as further away than the target.
+      (align-buffer-tests--note buffer 50 40)
+      (align-buffer-tests--view session 'left 20)
+      (let ((position (align-buffer-line-position buffer 50)))
+        (dolist (pixels (number-sequence 16 400 16))
+          (pcase-let ((`(,start . ,_)
+                       (align-buffer--start-for-pixels window position pixels)))
+            (should (< start position))))))))
+
+(ert-deftest align-buffer-test-a-lift-is-never-upside-down ()
+  "The remainder is something a vscroll can take off, which is never negative."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (align-buffer-exact-alignment t))
       (align-buffer-tests--note buffer 52 2)
       (align-buffer-tests--view session 'left 50)
       (let ((position (align-buffer-line-position buffer 60)))
         (dolist (pixels (number-sequence 0 140 3))
-          (pcase-let* ((`(,start . ,given)
+          (should (>= (cdr (align-buffer--start-for-pixels
+                            window position pixels))
+                      0)))))))
+
+(ert-deftest align-buffer-test-the-nearer-start-leaves-nothing-over ()
+  "Asked for the nearer boundary, there is no remainder to lift."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (align-buffer-exact-alignment nil))
+      (align-buffer-tests--note buffer 52 2)
+      (align-buffer-tests--view session 'left 50)
+      (let ((position (align-buffer-line-position buffer 60)))
+        (dolist (pixels (number-sequence 0 140 7))
+          (should (equal (cdr (align-buffer--start-for-pixels
+                               window position pixels))
+                         0)))))))
+
+(ert-deftest align-buffer-test-a-start-is-the-nearest-one-on-offer ()
+  "Asked for the nearer boundary, neither start either side of it is nearer."
+  (align-buffer-tests--with-session '((1 . 1))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (align-buffer-exact-alignment nil))
+      (align-buffer-tests--note buffer 52 2)
+      (align-buffer-tests--view session 'left 50)
+      (let ((position (align-buffer-line-position buffer 60)))
+        (dolist (pixels (number-sequence 0 140 3))
+          (pcase-let* ((`(,start . ,_)
                         (align-buffer--start-for-pixels window position pixels))
-                       (out (abs (- given pixels)))
+                       (out (abs (- (align-buffer--pixels-between
+                                     window start position)
+                                    pixels)))
                        (above (car (align-buffer--position-rows-below
                                     window start -1)))
                        (below (car (align-buffer--position-rows-below
@@ -338,61 +394,32 @@ position below it is one a walk of that many rows reaches."
                                        window below position)
                                       pixels)))))))))))
 
-(ert-deftest align-buffer-test-a-settled-viewport-needs-no-correction ()
-  "Point well inside the window is a window redisplay will leave alone."
-  (align-buffer-tests--with-session '((1 . 1))
-    (let ((window (align-buffer-tests--window session 'left)))
-      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
-      (align-buffer-tests--view session 'left 50 60)
-      (should (equal (align-buffer--settling-correction window) 0)))))
-
-(ert-deftest align-buffer-test-a-viewport-corrects-for-a-point-below-it ()
-  "Point past the bottom margin is one redisplay scrolls forward to clear."
-  (align-buffer-tests--with-session '((1 . 1))
-    (let* ((window (align-buffer-tests--window session 'left))
-	   (height (window-body-height window)))
-      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
-      (align-buffer-tests--view session 'left 50 (+ 50 height -1))
-      (should (equal (align-buffer--settling-correction window) 5)))))
-
-(ert-deftest align-buffer-test-a-viewport-corrects-for-a-point-above-it ()
-  "Point inside the top margin is one redisplay scrolls back to clear."
-  (align-buffer-tests--with-session '((1 . 1))
-    (let ((window (align-buffer-tests--window session 'left)))
-      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
-      (align-buffer-tests--view session 'left 50 52)
-      (should (equal (align-buffer--settling-correction window) -3)))))
-
-(ert-deftest align-buffer-test-the-first-line-has-nothing-to-scroll-back-into ()
-  "At the top of the buffer the margin asks for no correction, however close
-to the top point sits."
-  (align-buffer-tests--with-session '((1 . 1))
-    (let ((window (align-buffer-tests--window session 'left)))
-      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
-      (align-buffer-tests--view session 'left 1 2)
-      (should (equal (align-buffer--settling-correction window) 0)))))
-
-(ert-deftest align-buffer-test-the-last-line-has-nothing-to-scroll-into ()
-  "At the end of the buffer the margin asks for no correction, however close
-to the bottom point sits."
+(ert-deftest align-buffer-test-the-leader-reads-where-its-line-is-drawn ()
+  "The row the leader reports is the one it is drawing, whatever its margin."
   (align-buffer-tests--with-session '((1 . 1))
     (let* ((window (align-buffer-tests--window session 'left))
            (buffer (window-buffer window))
-           (last (align-buffer-tests--last-line buffer))
            (height (window-body-height window)))
       (with-current-buffer buffer (setq-local scroll-margin 5))
-      ;; The last line on the window's bottom row, so the margin is breached
-      ;; and there is nothing below to clear it with.
-      (align-buffer-tests--view session 'left (- last height -1) last)
-      (should (equal (align-buffer--settling-correction window) 0)))))
+      ;; Point inside the top margin, then past the bottom one: neither is a
+      ;; place redisplay moves a window it has already drawn, so the pixel
+      ;; wanted of it is the pixel it draws at in both.
+      (dolist (point-line (list 52 (+ 50 height -1)))
+        (align-buffer-tests--view session 'left 50 point-line)
+        (let ((position (align-buffer-line-position buffer 60)))
+          (should (equal (align-buffer--leader-pixels window position)
+                         (cdr (window-text-pixel-size
+                               window (window-start window) position)))))))))
 
-(ert-deftest align-buffer-test-a-correction-back-stops-at-the-first-line ()
-  "A window two rows into the buffer can only be scrolled back those two."
+(ert-deftest align-buffer-test-a-line-above-the-leader-top-reads-as-nothing ()
+  "A pair above the leader's own top holds the other window where it is."
   (align-buffer-tests--with-session '((1 . 1))
-    (let ((window (align-buffer-tests--window session 'left)))
-      (with-current-buffer (window-buffer window) (setq-local scroll-margin 5))
-      (align-buffer-tests--view session 'left 3 4)
-      (should (equal (align-buffer--settling-correction window) -2)))))
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window)))
+      (align-buffer-tests--view session 'left 50 55)
+      (should (equal (align-buffer--leader-pixels
+                      window (align-buffer-line-position buffer 40))
+                     0)))))
 
 (ert-deftest align-buffer-test-a-point-row-inside-the-band-is-left-alone ()
   (should (equal (align-buffer--clamp-point-row 10 nil 30 5) 10)))

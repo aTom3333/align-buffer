@@ -169,7 +169,9 @@ was in whichever of them the reader is not standing in."
                                  (get-buffer-window-list
                                   (align-buffer-buffer session side) nil t))
                                '(left right))))
-          (mapc #'align-buffer-forget-placement windows))
+          (mapc #'align-buffer-forget-placement windows)
+          ;; A window left lifted would show its first line part way off.
+          (mapc #'align-buffer-forget-vscroll windows))
         (dolist (side '(left right))
           (let ((buffer (align-buffer-buffer session side)))
             (when (buffer-live-p buffer)

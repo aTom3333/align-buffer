@@ -200,11 +200,18 @@ Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
       (set-buffer-modified-p nil))))
 
 (defun align-buffer-integration--pixel-y (window line)
-  "Return how far below WINDOW's top LINE sits, in pixels, or nil when hidden."
-  (let ((posn (posn-at-point
-               (align-buffer-line-position (window-buffer window) line)
-               window)))
-    (and posn (cdr (posn-x-y posn)))))
+  "Return how far below WINDOW's top LINE is drawn, in pixels, or nil when it
+is above the top.
+
+Measured with the window's buffer current, since `posn-at-point' answers
+against the selected window and so lies about every other one, and taken
+straight from `window-text-pixel-size', which takes the window's vscroll off
+and so gives where the line is drawn rather than what the span is worth."
+  (with-current-buffer (window-buffer window)
+    (let ((position (align-buffer-line-position (current-buffer) line)))
+      (and (>= position (window-start window))
+           (cdr (window-text-pixel-size window (window-start window)
+                                        position))))))
 
 (defun align-buffer-integration--out-by (session)
   "Return how many pixels apart the governing pair's two lines are drawn."
@@ -518,11 +525,8 @@ Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
                         (align-buffer-session-left-buffer session)))))
     (align-buffer-quit session)))
 
-;;; Point past the bottom margin with the end of the buffer already on screen.
-;;; Passes with `settling-cap' undone as well: redisplay moves the leader here
-;;; whatever the prediction, and a leader that moves fires its scroll hook and
-;;; syncs again, so the error repairs itself.  The two tests on
-;;; `align-buffer--settling-correction' are what pin the fix.
+;;; Point past the bottom margin with the end of the buffer already on screen,
+;;; which is a window redisplay leaves alone.
 (align-buffer-integration-defscenario arriving-at-the-end-of-the-buffer
   (let* ((session (align-buffer-integration--session))
          (window (get-buffer-window (align-buffer-session-right-buffer session)))
@@ -633,33 +637,13 @@ Measured, one run per name.  Eleven of the fifteen are caught:
   start-overshoots          a-taller-line-above-the-anchor
   point-from-pixels         a-taller-line-above-the-anchor
 
-And four are caught by nothing here:
+And two are caught by nothing here:
 
-  settling-cap         the bug needs redisplay to leave the leader where it is
-                       despite point breaching the margin, which is what it
-                       does at the end of a buffer it already shows whole.
-                       Every geometry tried here recentres the leader instead,
-                       and a leader that moves syncs again off its own scroll
-                       hook, so the wrong prediction is repaired before it can
-                       be seen.  Observed in a live session on the demo, where
-                       the leader held still and the follower moved a row.
-                       Covered by `align-buffer-test-the-last-line-has-nothing-
-                       to-scroll-into' instead.
-
-  settling-correction  the bug needs redisplay's correction of the leader to
-                       arrive while we are inside our own sync, which happens
-                       only through the forced redisplay in `post-command-hook'.
-                       A scenario settling at top level is outside that guard,
-                       so the correction is simply followed.  Recorded against
-                       the same fix in the synthetic-pane version, where the
-                       evidence was a log from a live session.
   note-point           a point-motion scroll whose window start is still stale
                        when the command hook runs.  Not reached by this set.
   window-big-enough    wants a window of one or two rows, which this harness
                        has no way to lay out."
   (pcase what
-    ("settling-correction"
-     (defun align-buffer--settling-correction (_window) 0))
     ("clamp-off-screen-anchor"
      ;; The unclamped reading, which lets a pair above the leader's top take a
      ;; negative offset and so drags the follower on by the height of the run.
@@ -668,9 +652,7 @@ And four are caught by nothing here:
      (defun align-buffer--leader-pixels (window position)
        (let ((start (window-start window)))
          (if (>= position start)
-             (- (align-buffer--pixels-between window start position)
-                (* (align-buffer--settling-correction window)
-                   (align-buffer--row-height window)))
+             (align-buffer--pixels-between window start position)
            (- (align-buffer--pixels-between window position start)))))
      (defun align-buffer--target (session side leader follower)
        (let* ((leader-buffer (window-buffer leader))
@@ -770,9 +752,10 @@ And four are caught by nothing here:
      (defun align-buffer--rows-apart (window from to)
        (round (align-buffer--pixels-between window from to)
               (align-buffer--row-height window)))
-     (defun align-buffer--follower-point (window start _counterpart _row
-                                                 point-row)
-       (car (align-buffer--position-rows-below window start point-row))))
+     (defun align-buffer--follower-point (window counterpart row point-row)
+       (ignore counterpart row)
+       (car (align-buffer--position-rows-below
+             window (window-start window) point-row))))
     ("start-overshoots"
      ;; The first start past what was asked rather than the nearer of the two,
      ;; which leaves the follower a row low wherever the pixel falls inside a
@@ -792,22 +775,6 @@ And four are caught by nothing here:
                                       window (point) position))
                    (when (>= best-pixels pixels) (setq done t))))
                (cons best best-pixels)))))))
-    ("settling-cap"
-     ;; The correction as predicted, with no account of whether the window has
-     ;; anywhere to scroll.
-     (defun align-buffer--settling-correction (window)
-       (let* ((height (max 1 (window-body-height window)))
-              (margin (align-buffer-effective-margin window))
-              (point-row (align-buffer--rows-from-start
-                          window (window-point window)))
-              (highest (max 0 (- height margin 1)))
-              (at-beginning (with-current-buffer (window-buffer window)
-                              (= (window-start window) (point-min)))))
-         (cond ((null point-row) 0)
-               ((> point-row highest) (- point-row highest))
-               ((and (< point-row margin) (not at-beginning))
-                (- point-row margin))
-               (t 0)))))
     ("row-count"
      ;; Rows counted by `count-screen-lines' while they are walked by
      ;; `vertical-motion', which disagree over a truncated long line.
