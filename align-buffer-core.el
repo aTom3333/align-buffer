@@ -244,11 +244,48 @@ edit still places the window somewhere rather than failing."
 
 ;;; Windows
 
+(defvar-local align-buffer--margin-held nil
+  "The reader's `scroll-margin' while this buffer's is held at zero.
+Either the number the buffer had of its own, or t where it had none and read
+the global one.")
+
 (defun align-buffer-effective-margin (window)
-  "Return the rows `scroll-margin' actually keeps clear in WINDOW."
-  (let ((height (window-body-height window)))
-    (min (buffer-local-value 'scroll-margin (window-buffer window))
-         (max 0 (truncate (* maximum-scroll-margin height))))))
+  "Return the rows the scroll margin keeps clear in WINDOW.
+The reader's margin even where it is held away from redisplay, so that what
+we draw clear of the edges does not change under them."
+  (let* ((buffer (window-buffer window))
+         (held (buffer-local-value 'align-buffer--margin-held buffer))
+         (margin (if (numberp held) held
+                   (buffer-local-value 'scroll-margin buffer)))
+         (height (window-body-height window)))
+    (min margin (max 0 (truncate (* maximum-scroll-margin height))))))
+
+(defun align-buffer-hold-margin (buffer)
+  "Keep redisplay from scrolling BUFFER's windows for their margin.
+
+Redisplay scrolls a window whose point sits inside the margin, and the first
+pass after a placement is the only one that honours what we wrote: the pass
+after it scrolls, and with `scroll-conservatively' at nothing that scroll
+recentres.  A placement holding point somewhere the margin dislikes on
+purpose therefore has to take the margin out of redisplay's hands, and
+`align-buffer-effective-margin' goes on reporting the reader's own."
+  (with-current-buffer buffer
+    (unless align-buffer--margin-held
+      (setq align-buffer--margin-held
+            (if (local-variable-p 'scroll-margin) scroll-margin t))
+      (setq-local scroll-margin 0))))
+
+(defun align-buffer-release-margin (buffer)
+  "Give BUFFER's margin back to redisplay."
+  (with-current-buffer buffer
+    (when align-buffer--margin-held
+      ;; Only where it is still the nothing we left: a reader who has set it
+      ;; since keeps what they set.
+      (when (equal scroll-margin 0)
+        (if (numberp align-buffer--margin-held)
+            (setq-local scroll-margin align-buffer--margin-held)
+          (kill-local-variable 'scroll-margin)))
+      (setq align-buffer--margin-held nil))))
 
 (provide 'align-buffer-core)
 

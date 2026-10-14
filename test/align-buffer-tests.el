@@ -320,11 +320,12 @@ position below it is one a walk of that many rows reaches."
             (should (or (equal given pixels)
                         (and (= start beginning) (< given pixels))))))))))
 
-(ert-deftest align-buffer-test-a-start-never-walks-below-the-line ()
-  "A start stays above the line it is placing, however big the note above it.
+(ert-deftest align-buffer-test-a-start-never-walks-past-the-line ()
+  "A start never goes below the line it is placing, however big the note above.
 A span is measured between two places whichever way round they are, so a
 candidate below the line reads as a span again and the walk would carry on to
-the end of the buffer."
+the end of the buffer.  The line itself is allowed: where the line above it
+is drawn taller than the pixel asked for, that is the nearest start there is."
   (align-buffer-tests--with-session '((1 . 1))
     (let* ((window (align-buffer-tests--window session 'left))
            (buffer (window-buffer window))
@@ -337,7 +338,7 @@ the end of the buffer."
         (dolist (pixels (number-sequence 16 400 16))
           (pcase-let ((`(,start . ,_)
                        (align-buffer--start-for-pixels window position pixels)))
-            (should (< start position))))))))
+            (should (<= start position))))))))
 
 (ert-deftest align-buffer-test-a-lift-is-never-upside-down ()
   "The remainder is something a vscroll can take off, which is never negative."
@@ -468,6 +469,64 @@ does not drag point down past its margin."
                        window (align-buffer-line-position buffer line) 5))
                (reached (cdr (align-buffer--position-rows-below window start 5))))
           (should (equal reached 5)))))))
+
+
+;;; Scrolling
+
+(ert-deftest align-buffer-test-a-scroll-moves-point-into-the-window ()
+  "A scroll long enough to carry point off brings it onto a line shown."
+  (align-buffer-tests--with-session '((1 . 1))
+    (align-buffer-tests--view session 'left 10 12)
+    (let* ((window (align-buffer-tests--window session 'left))
+           (scroll-preserve-screen-position nil))
+      (align-buffer-scroll-rows 30 window)
+      (should (>= (align-buffer--drawn-at window (window-point window)) 0)))))
+
+(ert-deftest align-buffer-test-a-scroll-can-keep-the-cursor-where-it-is ()
+  "With the screen position preserved, point ends on the row it began on."
+  (align-buffer-tests--with-session '((1 . 1))
+    (align-buffer-tests--view session 'left 10 20)
+    (let* ((window (align-buffer-tests--window session 'left))
+           (scroll-preserve-screen-position 'always)
+           (before (align-buffer--drawn-at window (window-point window))))
+      (align-buffer-scroll-rows 12 window)
+      (should (equal (align-buffer--drawn-at window (window-point window))
+                     before)))))
+
+(ert-deftest align-buffer-test-a-scroll-keeping-the-cursor-moves-point-on ()
+  "The cursor stays put by point moving down the text as the view does."
+  (align-buffer-tests--with-session '((1 . 1))
+    (align-buffer-tests--view session 'left 10 20)
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (scroll-preserve-screen-position 'always))
+      (align-buffer-scroll-rows 12 window)
+      (should (equal (align-buffer-line-at buffer (window-point window)) 32)))))
+
+(ert-deftest align-buffer-test-a-scroll-owns-the-view-until-its-command-ends ()
+  "A start written after a scroll of ours is ours to write again."
+  (align-buffer-tests--with-session '((1 . 1))
+    (align-buffer-tests--view session 'left 10 12)
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window)))
+      (align-buffer-scroll-rows 20 window)
+      (let ((scrolled (window-start window)))
+        (set-window-start window (align-buffer-line-position buffer 5))
+        (align-buffer-keep-scrolled-view)
+        (should (equal (window-start window) scrolled))))))
+
+(ert-deftest align-buffer-test-a-scroll-of-nobody-s-leaves-a-later-view-alone ()
+  "A scroll no command made is forgotten, so a later command keeps its view."
+  (align-buffer-tests--with-session '((1 . 1))
+    (align-buffer-tests--view session 'left 10 12)
+    (let* ((window (align-buffer-tests--window session 'left))
+           (buffer (window-buffer window))
+           (elsewhere (align-buffer-line-position buffer 5)))
+      (align-buffer-scroll-rows 20 window)
+      (with-current-buffer buffer (align-buffer--forget-scrolled-view))
+      (set-window-start window elsewhere)
+      (align-buffer-keep-scrolled-view)
+      (should (equal (window-start window) elsewhere)))))
 
 
 ;;; Placing the other window
@@ -662,31 +721,34 @@ line that had one, rather than scrolling it past content that answers nothing."
       (align-buffer-sync (align-buffer-tests--window session 'left))
       (should (equal (align-buffer-line-at buffer (window-point follower)) 30)))))
 
-(ert-deftest align-buffer-test-a-placement-inside-redisplay-asks-for-a-paint ()
-  "A window moved from inside redisplay is marked again once we are out of it,
-since the mark we make in there is honoured by nothing."
+(ert-deftest align-buffer-test-a-placement-inside-redisplay-is-queued ()
+  "Nothing is written from inside redisplay: the placement is queued instead.
+A start written there is one the pass we are inside can undo, and a lift
+written there loses its preserve flag to that very pass."
   (align-buffer-tests--with-session '((1 . 1) (40 . 40))
     (let ((follower (align-buffer-tests--window session 'right))
-          (align-buffer--pending-paint nil)
-          (align-buffer--paint-timer nil))
+          (align-buffer--pending-place nil)
+          (align-buffer--pending-timer nil))
       (align-buffer-tests--view session 'left 20 40)
-      (let ((align-buffer--in-redisplay t))
-        (should (align-buffer--place session follower 'right
-                                     (align-buffer-tests--window session 'left)))
-        (should (memq follower align-buffer--pending-paint)))
-      (when align-buffer--paint-timer
-        (cancel-timer align-buffer--paint-timer)))))
+      (let ((align-buffer--in-redisplay t)
+            (was (window-start follower)))
+        (should-not (align-buffer--place
+                     session follower 'right
+                     (align-buffer-tests--window session 'left)))
+        (should (eq (nth 1 align-buffer--pending-place) follower))
+        (should (= (window-start follower) was)))
+      (when align-buffer--pending-timer
+        (cancel-timer align-buffer--pending-timer)))))
 
-(ert-deftest align-buffer-test-a-placement-outside-redisplay-needs-no-paint ()
-  "Out of redisplay the paint we ask for lands, so nothing is queued."
+(ert-deftest align-buffer-test-a-placement-outside-redisplay-is-made-at-once ()
+  "Out of redisplay the placement is made rather than queued."
   (align-buffer-tests--with-session '((1 . 1) (40 . 40))
     (let ((follower (align-buffer-tests--window session 'right))
-          (align-buffer--pending-paint nil)
-          (align-buffer--paint-timer nil))
+          (align-buffer--pending-place nil))
       (align-buffer-tests--view session 'left 20 40)
       (should (align-buffer--place session follower 'right
                                    (align-buffer-tests--window session 'left)))
-      (should-not align-buffer--pending-paint))))
+      (should-not align-buffer--pending-place))))
 
 (ert-deftest align-buffer-test-the-post-place-hook-runs-on-a-placement ()
   "A placement that moved the window says so, naming the window and its side."

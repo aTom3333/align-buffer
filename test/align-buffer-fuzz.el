@@ -53,6 +53,12 @@ reach, since the second placement is one nothing but the walk asks for.")
 (defvar align-buffer-fuzz--state 1
   "The generator's state, so that a seed decides the whole run.")
 
+(defvar align-buffer-fuzz--reversals 0
+  "How many times a follower moved away from a position and back to it.")
+
+(defvar align-buffer-fuzz--at-rest nil
+  "The faults still there once the two panes have come to rest.")
+
 (defvar align-buffer-fuzz--faults nil
   "What the current run found, newest first.")
 
@@ -376,10 +382,16 @@ own would, rather than being level come what may."
               (when (or (null best) (< out best)) (setq best out))
               ;; Further back only lengthens the span, so once it is past what
               ;; the lift can close there is nothing better to find.
+              ;; Bounded at eighty lines rather than four hundred: each
+              ;; candidate costs a measurement across the span, and on two
+              ;; panes that are rarely level this walk is the whole cost of a
+              ;; run.  A walk that stops early can only report a bound wider
+              ;; than the true one, which makes the check the more forgiving
+              ;; of the two.
               (setq done (or (zerop out)
                              (> (- span bound) pixels)
                              (bobp)
-                             (> spent 400)))
+                             (> spent 80)))
               (unless done (forward-line -1) (setq spent (1+ spent))))))
         (or best 0)))))
 
@@ -393,21 +405,78 @@ own would, rather than being level come what may."
   "Return what WINDOW is showing and where its point is."
   (list (window-start window) (window-vscroll window t) (window-point window)))
 
+(defun align-buffer-fuzz--line-height (window position)
+  "Return the pixel height of the display of POSITION's line in WINDOW.
+Measured here rather than asked of align-buffer, so that one walk can be run
+against two builds of it and the two counts compared."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char position)
+      (let* ((start (line-beginning-position))
+             (next (progn (forward-line 1) (point))))
+        ;; Less what hangs at the next line, which is counted at either edge
+        ;; of a span and belongs to that line rather than to this one.
+        (max 1 (- (cdr (window-text-pixel-size window start next))
+                  (cdr (window-text-pixel-size window next next))))))))
+
+(defun align-buffer-fuzz--busy-p ()
+  "Return non-nil while align-buffer still has something of its own queued."
+  (or align-buffer--pending-timer
+      align-buffer--pending-place
+      (bound-and-true-p align-buffer--wait-timer)
+      (bound-and-true-p align-buffer--pending-paint)))
+
+(defun align-buffer-fuzz--where ()
+  "Return where every window of the frame sits."
+  (mapcar (lambda (window)
+            (list window (window-start window) (window-vscroll window t)
+                  (window-point window)))
+          (window-list)))
+
 (defun align-buffer-fuzz--settle (&optional follower)
-  "Let the timers and the redisplay they ask for run.
+  "Let the timers and the redisplay they ask for run, until nothing is left.
 Return how many different positions FOLLOWER held while they did, which is how
-jumpy the step was on the way to where it came to rest."
-  (let ((seen nil))
+jumpy the step was on the way to where it came to rest.
+
+Waiting for a round that moves nothing is not enough on its own: a placement
+queued on a timer has moved nothing yet, and a round shorter than the timer
+reads that as rest.  So we wait for the queue to empty as well, and sleep for
+longer than the delay a lift waits.  A check made before then is a check of a
+pane still on its way."
+  (let ((seen nil)
+        (before nil)
+        (quiet 0)
+        (rounds 0))
     ;; Sampled before the first redisplay as well, since the flicker a reader
     ;; sees is between where the command left the follower and where the
     ;; placement the command asked for puts it.
-    (dotimes (round 4)
-      (when (> round 0)
-        (redisplay t)
-        (sit-for 0.05))
+    (when (window-live-p follower)
+      (push (align-buffer-fuzz--position follower) seen))
+    ;; Two quiet rounds, not one: redisplay can hold a correction of its own
+    ;; back for a further pass - a window showing the end of its buffer with
+    ;; room to spare is filled a pass after it is asked to - and a round that
+    ;; moved nothing is not yet proof that nothing is going to.
+    (while (and (< rounds 20)
+                (or (align-buffer-fuzz--busy-p) (< quiet 2)))
+      (setq before (align-buffer-fuzz--where))
+      (redisplay t)
+      (sit-for (+ align-buffer--lift-delay 0.01))
+      (setq quiet (if (equal before (align-buffer-fuzz--where))
+                      (1+ quiet)
+                    0))
       (when (window-live-p follower)
         (let ((position (align-buffer-fuzz--position follower)))
-          (unless (member position seen) (push position seen)))))
+          ;; A position coming round again is the follower moving away and
+          ;; back, which is what a reader sees as a jump rather than as the
+          ;; two panes settling.  Counted apart from how many positions it
+          ;; held, since one more position on the way is not a jump and a
+          ;; return always is.
+          (when (and (not (equal position (car seen)))
+                     (member position seen))
+            (setq align-buffer-fuzz--reversals
+                  (1+ align-buffer-fuzz--reversals)))
+          (unless (member position seen) (push position seen))))
+      (setq rounds (1+ rounds)))
     (length seen)))
 
 
@@ -441,6 +510,12 @@ brings it back."
             ;; a run of lines with no counterpart, far enough below the pair
             ;; governing them that the pair is off the top - there is no row to
             ;; hold the follower to, and nothing is promised.
+            ;;
+            ;; Off the bottom says the same thing: a pair the leader draws
+            ;; below its own last row is one no follower can be level with,
+            ;; the follower being held to the window it has.
+            (when (and own (>= own (window-body-height leader t)))
+              (setq own nil))
             (unless own (cl-incf align-buffer-fuzz--unanchored))
             ;; Level, or as near as any start of the follower's could be.  The
             ;; walk over its starts costs a measurement each, so it is asked for
@@ -488,7 +563,16 @@ brings it back."
                      (at (align-buffer-line-at (window-buffer follower)
                                                (window-point follower)))
                      (drawn (and at (align-buffer-fuzz--drawn follower at)))
-                     (point-row (and drawn (round drawn height))))
+                     (point-row (and drawn (round drawn height)))
+                     ;; How many rows point's own line is drawn as: point can
+                     ;; only sit on a line, and a line taller than a row
+                     ;; covers the row the band asks for without beginning on
+                     ;; it, which is as near as the band can be met.
+                     (point-rows
+                      (and drawn
+                           (max 1 (round (align-buffer-fuzz--line-height
+                                          follower (window-point follower))
+                                         height)))))
                 (cond
                  ((null point-row)
                   (push (cons 'point
@@ -497,7 +581,9 @@ brings it back."
                                               "top")
                                       at))
                         faults))
-                 ((= point-row wanted) nil)
+                 ((and (<= point-row wanted)
+                       (< wanted (+ point-row point-rows)))
+                  nil)
                  ((= wanted row)
                   (push (cons 'point
                               (format (concat "the pair is drawn on row %s, "
@@ -626,6 +712,22 @@ a jump to a line and a recenter - ask for the placement themselves."
                                  (align-buffer-fuzz--settle)
                                  (align-buffer-fuzz--check session))
                         (align-buffer-fuzz--settled-check session))))))
+    ;; And once more after letting everything come to rest again.  A
+    ;; placement made while the leader was still settling - a point taken to
+    ;; the end of the buffer settles over more than one pass - is corrected by
+    ;; the hook that the leader's own move runs, so a fault seen at the first
+    ;; look can be gone a moment later.  What is still wrong here is wrong for
+    ;; good, which is what a reader is left looking at.
+    ;;
+    ;; ALIGN_BUFFER_FUZZ_AT_REST=no leaves it out, which is how a walk over
+    ;; code that fails often enough to make the second look cost more than
+    ;; the walk itself still finishes.
+    (unless (equal (getenv "ALIGN_BUFFER_FUZZ_AT_REST") "no")
+      (align-buffer-fuzz--settle)
+      (dolist (fault (align-buffer-fuzz--check session))
+        (push (format "seed %s step %s (%s) [%s] %s"
+                      seed number label (car fault) (cdr fault))
+              align-buffer-fuzz--at-rest)))
     (dolist (fault faults)
       (push (format "seed %s step %s (%s) [%s] %s"
                     seed number label (car fault) (cdr fault))
@@ -638,6 +740,8 @@ Everything the walk does follows from SEED, so a fault is replayed by its seed
 and step number alone."
   (align-buffer-fuzz--seed seed)
   (setq align-buffer-fuzz--faults nil)
+  (setq align-buffer-fuzz--at-rest nil)
+  (setq align-buffer-fuzz--reversals 0)
   (setq align-buffer-fuzz--jumpy nil)
   (setq align-buffer-fuzz--unanchored 0)
   (setq align-buffer-fuzz--unreachable 0)
@@ -762,10 +866,16 @@ the steps per seed, and ALIGN_BUFFER_FUZZ_OUT where to write."
        (let ((lines nil)
              (counts nil)
              (jumpiest 0)
+             (resting 0)
+             (reversals 0)
              (total 0))
          (cl-loop for seed from first to last do
                   (let ((faults (align-buffer-fuzz-walk seed steps)))
                     (setq total (+ total (length faults)))
+                    (setq resting (+ resting
+                                     (length align-buffer-fuzz--at-rest)))
+                    (setq reversals (+ reversals align-buffer-fuzz--reversals))
+                    (setq lines (append lines align-buffer-fuzz--at-rest))
                     (setq jumpiest (max jumpiest (apply #'max 1 align-buffer-fuzz--jumpy)))
                     (dolist (one align-buffer-fuzz--jumpy)
                       (setf (alist-get one counts 0) (1+ (alist-get one counts 0))))
@@ -787,6 +897,14 @@ the steps per seed, and ALIGN_BUFFER_FUZZ_OUT where to write."
          (with-temp-file file
            (insert (format "seeds %s-%s, %s steps each, %d fault(s)\n"
                            first last steps total))
+           ;; Of those, the ones still there once the panes have come to rest,
+           ;; which is what a reader is left looking at: a placement made
+           ;; while the leader was still settling is corrected by the hook
+           ;; that its own move runs, and the rest of the count is that
+           ;; window of time.
+           (insert (format "%d of them still there at rest\n" resting))
+           (insert (format "%d step(s) where a pane moved away and back\n"
+                           reversals))
            ;; The geometry, since where a walk ends up depends on it and a
            ;; maximized frame is a different size on a different screen.
            (insert (format "a frame of %s by %s, so a window of %s rows\n"
