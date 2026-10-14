@@ -24,6 +24,11 @@
 ;; nowhere to go.  What is on offer is that the pair governing the line point is
 ;; on is always level, which is the line being read.
 ;;
+;; A consumer that wants more than that hangs a pad where the lines are
+;; missing, with `align-buffer-pad-add': a blank row for each of them, which
+;; leaves every line facing either its own counterpart or a row standing in for
+;; it.  The rows are walked and scrolled through like lines of their own.
+;;
 ;; This file owns the lifecycle: set up, change the correspondence, tear down,
 ;; and the hooks a consumer uses to put the windows where it wants them.
 
@@ -31,6 +36,7 @@
 
 (require 'align-buffer-core)
 (require 'align-buffer-sync)
+(require 'align-buffer-pads)
 
 (defcustom align-buffer-layout-function #'align-buffer-layout-side-by-side
   "Function laying out a session's two buffers.

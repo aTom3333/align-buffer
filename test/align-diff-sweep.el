@@ -104,9 +104,9 @@ like, and is marked."
     (when position
       (with-current-buffer buffer
         (let ((pad (seq-find (lambda (overlay)
-                               (overlay-get overlay 'align-diff-pad-rows))
+                               (overlay-get overlay 'align-buffer-pad-rows))
                              (overlays-in position position))))
-          (and pad (align-diff--pad-rows pad)))))))
+          (and pad (align-buffer-pad-rows pad)))))))
 
 (defun align-diff-sweep--places (buffer from to)
   "Return every place the arrows should visit in BUFFER from line FROM to TO.
@@ -125,7 +125,7 @@ there starts on the line itself."
   "Return where BUFFER is being read, as (LINE . ROW)."
   (with-current-buffer buffer
     (cons (align-buffer-line-at buffer (point))
-          (cdr align-diff--walked))))
+          (cdr align-buffer--walked))))
 
 (defun align-diff-sweep--panes (session)
   "Return what both of SESSION's panes are showing, as a string."
@@ -196,10 +196,10 @@ the screen moving again after the reader could already see it."
 A walked pad row carries the cursor, and the row is what is then asked about,
 point being on a line the pad hangs below everything shown."
   (let* ((buffer (window-buffer window))
-         (walked (buffer-local-value 'align-diff--walked buffer)))
+         (walked (buffer-local-value 'align-buffer--walked buffer)))
     (if walked
-        (align-diff--row-shown-p window (car walked) (cdr walked))
-      (let ((offset (align-diff--offset-in window (window-point window))))
+        (align-buffer--pad-row-shown-p window (car walked) (cdr walked))
+      (let ((offset (align-buffer--offset-in window (window-point window))))
         (and (>= offset 0)
              (<= (+ offset (align-buffer--row-height window))
                  (window-body-height window t)))))))
@@ -210,17 +210,17 @@ Nil when nothing says what level means there: a line with no counterpart, or
 a pair the leader is no longer showing, which is align-buffer's own rule."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer))
-         (walked (buffer-local-value 'align-diff--walked buffer)))
+         (walked (buffer-local-value 'align-buffer--walked buffer)))
     (if walked
         (pcase-let* ((`(,overlay . ,row) walked)
-                     (facing (overlay-get overlay 'align-diff-pad-facing))
-                     (first (overlay-get overlay 'align-diff-pad-facing-line))
+                     (facing (overlay-get overlay 'align-buffer-pad-facing))
+                     (first (overlay-get overlay 'align-buffer-pad-facing-line))
                      (other (and (buffer-live-p facing)
                                  (get-buffer-window facing))))
           (when (and other first)
-            (let ((wanted (+ (align-diff--pad-top window overlay)
+            (let ((wanted (+ (align-buffer--pad-top window overlay)
                              (* row (align-buffer--row-height window))))
-                  (drawn (align-diff--offset-in
+                  (drawn (align-buffer--offset-in
                           other (align-buffer-line-position facing
                                                             (+ first row)))))
               (- drawn wanted))))
@@ -233,13 +233,13 @@ a pair the leader is no longer showing, which is align-buffer's own rule."
           (let* ((other-buffer (align-buffer-buffer
                                 session (align-buffer-other-side side)))
                  (other (get-buffer-window other-buffer))
-                 (own (align-diff--offset-in
+                 (own (align-buffer--offset-in
                        window (align-buffer-line-position buffer
                                                           (car anchor)))))
             ;; Above the leader's own top there is no row to be level with,
             ;; and the follower is then held at the top on purpose.
             (when (and other (>= own 0))
-              (- (align-diff--offset-in
+              (- (align-buffer--offset-in
                   other (align-buffer-line-position other-buffer
                                                     (cdr anchor)))
                  own))))))))
@@ -339,10 +339,10 @@ line-moving commands move by one of those rows at a time, so crossing such a
 line takes a press for each."
   (let* ((buffer (window-buffer window))
          (height (align-buffer--row-height window))
-         (pad (align-diff--pad-at
+         (pad (align-buffer-pad-at
                (align-buffer-line-position
                 buffer (align-buffer-line-at buffer position))))
-         (rows (if pad (align-diff--pad-rows pad) 0)))
+         (rows (if pad (align-buffer-pad-rows pad) 0)))
     (max 1 (- (/ (align-buffer-line-display-height window position) height)
               rows))))
 
@@ -404,7 +404,7 @@ its own and one break does not report every press after it."
          (last (align-buffer-line-position
                 buffer (align-diff--line-count buffer))))
     (and last (>= last (window-start window))
-         (< (align-diff--offset-in window last)
+         (< (align-buffer--offset-in window last)
             (window-body-height window t)))))
 
 (defun align-diff-sweep--scroll (session side key rows)
@@ -421,13 +421,13 @@ measurement the window's own lift cancels out of."
          (wanted (* rows (align-buffer--row-height window)))
          (step 0))
     (while (let* ((mark (window-start window))
-                  (before (align-diff--offset-in window mark))
+                  (before (align-buffer--offset-in window mark))
                   (where (format "%s %s %s" side key (setq step (1+ step))))
                   (raised (progn (setq align-diff-sweep--seen
                                        (1+ align-diff-sweep--seen))
                                  (align-diff-sweep--press key))))
              (align-diff-sweep--settle)
-             (let* ((travelled (- before (align-diff--offset-in window mark))))
+             (let* ((travelled (- before (align-buffer--offset-in window mark))))
                (when raised
                  (align-diff-sweep--note 'raised where nil
                                          (format "%S" raised)))
@@ -465,11 +465,11 @@ measurement the window's own lift cancels out of."
                          next-screen-context-lines)))
          (last (align-diff--line-count buffer)))
     (dolist (key (list (cons "C-v" page)
-                       (cons "<wheel-down>" align-diff-wheel-rows)))
+                       (cons "<wheel-down>" align-buffer-wheel-rows)))
       (align-diff-sweep--stand session side 1)
       (align-diff-sweep--scroll session side (car key) (cdr key)))
     (dolist (key (list (cons "M-v" (- page))
-                       (cons "<wheel-up>" (- align-diff-wheel-rows))))
+                       (cons "<wheel-up>" (- align-buffer-wheel-rows))))
       (align-diff-sweep--stand session side last)
       (align-diff-sweep--scroll session side (car key) (cdr key)))))
 
@@ -583,7 +583,7 @@ presses are the check of that claim rather than a reading of its source."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer)))
     (select-window window)
-    (align-diff--walk-away)
+    (align-buffer--walk-away)
     (with-current-buffer buffer
       (goto-char (align-buffer-line-position buffer line))
       (set-window-point window (point)))
@@ -592,7 +592,7 @@ presses are the check of that claim rather than a reading of its source."
     ;; outside has had none of the keeping that every command does, and a pane
     ;; left with its own point behind a lift is not a state any press reaches.
     (redisplay t)
-    (align-diff--keep-point-in-band window)
+    (align-buffer--keep-point-in-band window)
     (align-diff-sweep--settle)))
 
 (defun align-diff-sweep--session ()

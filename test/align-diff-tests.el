@@ -80,8 +80,8 @@ side of the boundary, so the lines are what these count."
       ;; A pad hangs off the newline of the line before the boundary, and the
       ;; line it marks is the one its rows are drawn in front of.
       (let ((line (align-buffer-line-at
-                   buffer (if (overlay-get overlay 'align-diff-pad-rows)
-                              (align-diff--pad-anchor overlay)
+                   buffer (if (overlay-get overlay 'align-buffer-pad-rows)
+                              (align-buffer-pad-anchor overlay)
                             (overlay-start overlay))))
             (kind (align-diff-tests--gap-kind overlay)))
         (cond ((null kind))             ; the newline ending the line's own row
@@ -108,7 +108,7 @@ side of the boundary, so the lines are what these count."
   "Return which kind of mark OVERLAY draws, or nil when it draws nothing."
   (let ((face (overlay-get overlay 'face))
         (string (overlay-get overlay 'before-string)))
-    (cond ((overlay-get overlay 'align-diff-pad-rows) 'pad)
+    (cond ((overlay-get overlay 'align-buffer-pad-rows) 'pad)
           ((plist-get face :height) 'slit)
           ((null string) nil)
           ((memq (car-safe (get-text-property 0 'display string))
@@ -388,29 +388,9 @@ left over at the end of the longer side get no triangle of their own."
     (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\nc\ntwo\n"
       (should (equal (align-diff-tests--gaps old) '((2 . pad))))
       (let ((overlay (align-diff-tests--gap-overlay old)))
-        (should (= (overlay-get overlay 'align-diff-pad-rows) 3))
-        (should (eq (overlay-get overlay 'align-diff-pad-facing) new))
-        (should (= (overlay-get overlay 'align-diff-pad-facing-line) 2))))))
-
-(ert-deftest align-diff-test-every-pad-row-carries-a-glyph ()
-  "A row drawn from nothing can hold no cursor, so each row has a space.
-That is what lets the cursor be asked for on a row, which is how a pad is
-walked at all.
-
-The opening newline ends the row of the line the pad hangs after and is drawn
-in no colour, so that line's own row is left as the reader wrote it.  The last
-row has no newline of its own: the line's own newline closes it, which the pad
-is drawn over so that it is painted too."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
-      (let ((overlay (align-diff-tests--gap-overlay old)))
-        (should (equal (overlay-get overlay 'before-string) "\n \n "))
-        (should-not (get-text-property 0 'face
-                                       (overlay-get overlay 'before-string)))
-        (should (eq (get-text-property 1 'face
-                                       (overlay-get overlay 'before-string))
-                    'align-diff-removed))
-        (should (eq (overlay-get overlay 'face) 'align-diff-removed))))))
+        (should (= (overlay-get overlay 'align-buffer-pad-rows) 3))
+        (should (eq (overlay-get overlay 'align-buffer-pad-facing) new))
+        (should (= (overlay-get overlay 'align-buffer-pad-facing-line) 2))))))
 
 (ert-deftest align-diff-test-a-pad-leaves-a-coloured-line-painted ()
   "The newline closing the row of the line a pad hangs after keeps its colour.
@@ -421,11 +401,11 @@ Faced with nothing there, the line would be painted only as far as its text."
     (align-diff-tests--with-session "one\nchanged\ntwo\n"
         "one\nCHANGED\na\nb\ntwo\n"
       (let ((overlay (align-diff-tests--gap-overlay old)))
-        (should (= (align-diff--pad-rows overlay) 2))
+        (should (= (align-buffer-pad-rows overlay) 2))
         (should (eq (get-text-property 0 'face
                                        (overlay-get overlay 'before-string))
                     'align-diff-removed))
-        (should (eq (overlay-get overlay 'align-diff-pad-opening)
+        (should (eq (overlay-get overlay 'align-buffer-pad-opening)
                     'align-diff-removed))))
     ;; And an unchanged line keeps its row as the reader wrote it.
     (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
@@ -433,160 +413,21 @@ Faced with nothing there, the line would be painted only as far as its text."
                    0 'face (overlay-get (align-diff-tests--gap-overlay old)
                                         'before-string))))))
 
-(ert-deftest align-diff-test-a-pad-in-front-of-the-first-line-hangs-on-it ()
-  "With no line before the boundary the rows go in front of the first line.
-They are then rows of its own display, which is the one place a line cannot
-keep its number beside its text, there being nothing above to carry them."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "a\nb\none\ntwo\n"
-      (let ((overlay (align-diff-tests--gap-overlay old)))
-        (should (= (align-diff--pad-anchor overlay) (point-min)))
-        (should (= (overlay-start overlay) (overlay-end overlay)))
-        (should (= (align-diff--pad-rows overlay) 2))
-        ;; No newline to open them and none to close them, so every row
-        ;; carries its own.
-        (should (equal (overlay-get overlay 'before-string) " \n \n"))
-        (should (eq (align-diff--pad-at (point-min) old) overlay))))))
-
-(ert-deftest align-diff-test-a-pad-is-found-in-front-of-the-line-it-marks ()
-  "The pad standing before a line is found by that line's own position."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
-      (let ((overlay (align-diff-tests--gap-overlay old)))
-        (should (eq (align-diff--pad-at (align-buffer-line-position old 2) old)
-                    overlay))
-        (should (null (align-diff--pad-at (align-buffer-line-position old 1)
-                                          old)))
-        ;; Read in the pane that has not got it, nothing.
-        (should (null (align-diff--pad-at (align-buffer-line-position old 2)
-                                          new)))))))
-
-(ert-deftest align-diff-test-walking-a-pad-moves-the-cursor-not-point ()
-  "Each step asks for the cursor one row further down and leaves point alone.
-Point waits at the end of the line the rows hang after, which is where they
-are drawn and so the only place a row of them can carry the cursor."
+(ert-deftest align-diff-test-a-pad-of-a-diff-is-walked-row-by-row ()
+  "The rows a gap is drawn as are rows a session steps through one at a time.
+The stepping itself is align-buffer's; what is checked here is that a pad of
+ours is a pad it recognises."
   (let ((align-diff-gap-marker 'pad))
     (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\nc\ntwo\n"
       (with-current-buffer old
         (goto-char (align-buffer-line-position old 1))
         (call-interactively #'next-line)
-        (should (equal (cdr align-diff--walked) 0))
-        (should (= (point) (align-diff--pad-hangs (car align-diff--walked))))
-        (should (= (line-number-at-pos (point)) 1))
+        (should (eq (car align-buffer--walked)
+                    (align-diff-tests--gap-overlay old)))
+        (should (equal (cdr align-buffer--walked) 0))
         (call-interactively #'next-line)
-        (should (equal (cdr align-diff--walked) 1))
-        (should (= (line-number-at-pos (point)) 1))
-        ;; The row being walked is the one asking for the cursor, which for
-        ;; the second row is the space after the opening newline and the first
-        ;; row's own.
-        (let ((string (overlay-get (car align-diff--walked) 'before-string)))
-          (should (get-text-property 3 'cursor string))
-          (should-not (get-text-property 1 'cursor string)))))))
-
-(ert-deftest align-diff-test-walking-out-of-a-pad-reaches-the-line-below ()
-  "The step after the last row of a pad leaves it, cursor back on the text."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
-      (with-current-buffer old
-        (goto-char (align-buffer-line-position old 1))
-        (dotimes (_ 3) (call-interactively #'next-line))
-        (should (null align-diff--walked))
-        (should (= (line-number-at-pos (point)) 2))
-        (should-not (get-text-property
-                     0 'cursor (overlay-get (align-diff-tests--gap-overlay old)
-                                            'before-string)))))))
-
-(ert-deftest align-diff-test-walking-up-out-of-a-pad-takes-one-press ()
-  "The step up from the first row lands on the text of the line it hangs after.
-The place point waits while a row is read counts as the rows themselves, so a
-reader left standing there would spend the press after this one getting off
-them and appear not to have moved at all."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\nthree\n" "one\ntwo\na\nb\nthree\n"
-      (with-selected-window (get-buffer-window old)
-        (goto-char (align-buffer-line-position old 3))
-        (dotimes (_ 2) (call-interactively #'previous-line))
-        (should (equal (cdr align-diff--walked) 0))
-        (call-interactively #'previous-line)
-        (should (null align-diff--walked))
-        (should (= (line-number-at-pos (point)) 2))
-        (should-not (= (point) (line-end-position)))
-        ;; And the press after it moves a line, rather than being spent.
-        (call-interactively #'previous-line)
+        (should (equal (cdr align-buffer--walked) 1))
         (should (= (line-number-at-pos (point)) 1))))))
-
-(ert-deftest align-diff-test-walking-back-up-a-pad-returns-to-its-rows ()
-  "Stepping up from the line below a pad walks its rows from the bottom."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\nc\ntwo\n"
-      (with-current-buffer old
-        (goto-char (align-buffer-line-position old 2))
-        (call-interactively #'previous-line)
-        (should (equal (cdr align-diff--walked) 2))
-        (call-interactively #'previous-line)
-        (should (equal (cdr align-diff--walked) 1))))))
-
-(ert-deftest align-diff-test-a-scroll-that-moves-nothing-says-so ()
-  "A scroll with nowhere to go signals, as the commands we stand in for do.
-`evil-scroll-down' and the rest have the end of their own work to do when the
-view cannot move, and a reader is told they are at the end of the buffer."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\ntwo\n"
-      (with-selected-window (get-buffer-window old)
-        (goto-char (point-min))
-        (should-error (scroll-down 1) :type 'beginning-of-buffer)))))
-
-(ert-deftest align-diff-test-a-scroll-gives-the-windows-back ()
-  "A scroll out of a run hands the pairs the two panes again.
-Both panes are ours while a run of lines the other side has not got is read,
-and a scroll that leaves the run has to say so or the pairs never speak for
-them again."
-  (let* ((align-diff-gap-marker 'pad)
-         (lines (lambda (from to)
-                  (mapconcat (lambda (number) (format "line %03d\n" number))
-                             (number-sequence from to) "")))
-         (tail (funcall lines 2 80)))
-    (align-diff-tests--with-session
-        (concat "line 001\n" tail)
-        (concat "line 001\nadded one\nadded two\n" tail)
-      (with-selected-window (get-buffer-window new)
-        ;; On a line of the run the old side has not got, so the pad standing
-        ;; for it over there is read and both panes are held.
-        (goto-char (align-buffer-line-position new 3))
-        (let ((this-command 'next-line)) (align-diff--walk-check))
-        (should align-buffer-inhibit-sync)
-        (scroll-up 20)
-        (let ((this-command 'scroll-up-command)) (align-diff--walk-check))
-        (should-not align-buffer-inhibit-sync)))))
-
-(ert-deftest align-diff-test-moving-point-ends-the-walk ()
-  "A command that moves point gives the cursor back to the text."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
-      ;; The pane the walk is in has to be the selected one, since the check
-      ;; after a command speaks for the window the reader stands in.
-      (with-selected-window (get-buffer-window old)
-        (goto-char (align-buffer-line-position old 1))
-        (call-interactively #'next-line)
-        (should align-diff--walked)
-        (let ((this-command 'forward-char))
-          (forward-char 1)
-          (align-diff--walk-check))
-        (should (null align-diff--walked))
-        (should (null align-buffer-inhibit-sync))))))
-
-(ert-deftest align-diff-test-a-walk-is-held-by-where-point-is ()
-  "The walk lasts while point is on the line the pad hangs on, and no longer.
-So a prefix key or a look at the documentation leaves the reader on their row,
-and any command at all that moves point ends the walk, named or not."
-  (let ((align-diff-gap-marker 'pad))
-    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\ntwo\n"
-      (with-current-buffer old
-        (goto-char (align-buffer-line-position old 1))
-        (call-interactively #'next-line)
-        (should (align-diff--walk-kept-p))
-        (forward-char 1)
-        (should-not (align-diff--walk-kept-p))))))
 
 (ert-deftest align-diff-test-a-mark-takes-no-position-in-the-buffer ()
   "The marks are display, so the text is the reader's own, untouched."

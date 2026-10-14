@@ -152,7 +152,7 @@ longer than the delay a lift waits."
 (defun align-diff-integration--pad (session side)
   "Return the one pad in SESSION's SIDE buffer."
   (with-current-buffer (align-buffer-buffer session side)
-    (seq-find (lambda (overlay) (overlay-get overlay 'align-diff-pad-rows))
+    (seq-find (lambda (overlay) (overlay-get overlay 'align-buffer-pad-rows))
               (overlays-in (point-min) (point-max)))))
 
 (defun align-diff-integration--stand (session side line)
@@ -161,7 +161,7 @@ longer than the delay a lift waits."
          (window (get-buffer-window buffer)))
     (select-window window)
     (with-current-buffer buffer
-      (align-diff--walk-away)
+      (align-buffer--walk-away)
       (goto-char (align-buffer-line-position buffer line))
       (set-window-point window (point)))
     (align-buffer-sync window)
@@ -169,30 +169,30 @@ longer than the delay a lift waits."
 
 (defun align-diff-integration--walked (session side)
   "Return the row of SESSION's SIDE pad the cursor is on, or nil."
-  (let ((walked (buffer-local-value 'align-diff--walked
+  (let ((walked (buffer-local-value 'align-buffer--walked
                                     (align-buffer-buffer session side))))
     (and walked (cdr walked))))
 
 (defun align-diff-integration--top-row (session side)
   "Return the row of SESSION's SIDE pad the top of its window falls on, or nil."
   (let* ((window (get-buffer-window (align-buffer-buffer session side)))
-         (pad (align-diff--pad-at-top window)))
-    (and pad (align-diff--row-at window pad (car (align-buffer--band window))))))
+         (pad (align-buffer--pad-at-top window)))
+    (and pad (align-buffer--pad-row-at window pad (car (align-buffer--band window))))))
 
 (defun align-diff-integration--out-by (session side)
   "Return how far out of level the walked row and its own line are drawn.
 Nil when no pad is being walked, which is a different answer from zero."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer))
-         (walked (buffer-local-value 'align-diff--walked buffer)))
+         (walked (buffer-local-value 'align-buffer--walked buffer)))
     (when walked
       (pcase-let* ((`(,overlay . ,row) walked)
-                   (facing (overlay-get overlay 'align-diff-pad-facing))
-                   (first (overlay-get overlay 'align-diff-pad-facing-line))
+                   (facing (overlay-get overlay 'align-buffer-pad-facing))
+                   (first (overlay-get overlay 'align-buffer-pad-facing-line))
                    (other (get-buffer-window facing))
-                   (wanted (+ (align-diff--pad-top window overlay)
+                   (wanted (+ (align-buffer--pad-top window overlay)
                               (* row (align-buffer--row-height window))))
-                   (drawn (align-diff--offset-in
+                   (drawn (align-buffer--offset-in
                            other (align-buffer-line-position facing
                                                              (+ first row)))))
         (- drawn wanted)))))
@@ -209,10 +209,10 @@ buffer's own rule for leaving the panes alone."
       (let* ((other-buffer (align-buffer-buffer
                             session (align-buffer-other-side side)))
              (other (get-buffer-window other-buffer))
-             (own (align-diff--offset-in
+             (own (align-buffer--offset-in
                    window (align-buffer-line-position buffer (car anchor)))))
         (when (and other (>= own 0))
-          (- (align-diff--offset-in
+          (- (align-buffer--offset-in
               other (align-buffer-line-position other-buffer (cdr anchor)))
              own))))))
 
@@ -228,7 +228,7 @@ buffer's own rule for leaving the panes alone."
   (let ((session (align-diff-integration--session)))
     (align-diff-integration--expect
      "the pad's rows" align-diff-integration--added
-     (align-diff--pad-rows (align-diff-integration--pad session 'left)))
+     (align-buffer-pad-rows (align-diff-integration--pad session 'left)))
     (align-diff-integration--expect
      "no pad on the side that has the lines" nil
      (align-diff-integration--pad session 'right))
@@ -328,7 +328,7 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--wheel window 'wheel-down 5)
     (setq after (align-diff-integration--walked session 'left))
     (align-diff-integration--expect "rows crossed by five notches"
-                                    (* 5 align-diff-wheel-rows)
+                                    (* 5 align-buffer-wheel-rows)
                                     (and after entered (- after entered)))
     (align-diff-integration--expect "still out of level by" 0
                                     (align-diff-integration--out-by session
@@ -386,7 +386,7 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--wheel window 'wheel-up 5)
     (setq after (align-diff-integration--top-row session 'left))
     (align-diff-integration--expect "rows crossed back by five notches"
-                                    (* 5 align-diff-wheel-rows)
+                                    (* 5 align-buffer-wheel-rows)
                                     (and after entered (- entered after)))
     (align-diff-integration--expect "out of level by" 0
                                     (align-diff-integration--out-by session
@@ -432,7 +432,7 @@ buffer's own rule for leaving the panes alone."
   (let ((session (align-diff-integration--session 'right)))
     (align-diff-integration--expect
      "the pad's rows" align-diff-integration--added
-     (align-diff--pad-rows (align-diff-integration--pad session 'right)))
+     (align-buffer-pad-rows (align-diff-integration--pad session 'right)))
     (align-diff-integration--expect
      "no pad on the side that has the lines" nil
      (align-diff-integration--pad session 'left))
@@ -518,7 +518,7 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--wheel window 'wheel-down 5)
     (setq after (align-diff-integration--walked session 'right))
     (align-diff-integration--expect "rows crossed by five notches"
-                                    (* 5 align-diff-wheel-rows)
+                                    (* 5 align-buffer-wheel-rows)
                                     (and after entered (- after entered)))
     (align-diff-integration--expect "out of level by" 0
                                     (align-diff-integration--out-by session
@@ -551,7 +551,7 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--stand session 'left
                                    (1- align-diff-integration--at))
     (align-diff-integration--click
-     window (+ (align-diff--pad-top window pad) (* row height) (/ height 2)))
+     window (+ (align-buffer--pad-top window pad) (* row height) (/ height 2)))
     (align-diff-integration--expect
      "the row clicked" row (align-diff-integration--walked session 'left))
     (align-diff-integration--expect
