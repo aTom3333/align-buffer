@@ -17,7 +17,8 @@
 ;; reader holding the arrow key down would see something wrong.
 ;;
 ;; Needs a graphical frame.  Run with:
-;;   emacs -Q -L . -L test -l test/align-diff-sweep.el -f align-diff-sweep-batch
+;;   emacs -Q --iconic -L . -L test -l test/align-diff-sweep.el \
+;;         -f align-diff-sweep-batch
 ;;
 ;; The scroll keys are swept too: a page and a wheel notch, to the end of the
 ;; buffer and back, checking that the view moves exactly as far as the key
@@ -35,6 +36,7 @@
 
 (require 'align-diff)
 (require 'align-diff-demo)
+(require 'align-buffer-background)
 (require 'cl-lib)
 
 ;; Evil is swept where it is installed, and the sweep loads it itself.
@@ -738,8 +740,7 @@ than the name of a command, and these reach it by different roads.")
     (run-with-idle-timer
      0.5 nil
      (lambda ()
-       (set-frame-parameter (selected-frame) 'fullscreen 'maximized)
-       (redisplay t)
+       (align-buffer-background-frame)
        ;; Whatever happens, the report is written and the frame goes away: a
        ;; run left standing with an error in it says nothing from out here.
        (let ((problems (condition-case error (align-diff-sweep-run)

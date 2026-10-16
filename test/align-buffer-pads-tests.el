@@ -144,6 +144,54 @@ keep its number beside its text, there being nothing above to carry them."
         (should (null (align-buffer-pads-tests--only-pad left)))))))
 
 
+(ert-deftest align-buffer-pads-test-rows-above-the-first-line-are-measured ()
+  "A pad in front of the first line is counted in a span from the start.
+Its rows have no line before them to hang after, so they hang where they are
+drawn, and a span beginning there is measured as none of them unless what
+hangs at its own beginning is put back."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "a\nb\nc\none\ntwo\nthree\n"
+      '((1 . 4) (2 . 5) (3 . 6))
+    (let* ((window (get-buffer-window left))
+           (height (align-buffer--row-height window))
+           (two (align-buffer-line-position left 2))
+           (before (align-buffer--offset-in window two))
+           (pad (align-buffer-pads-tests--pad left 1 3 right 1)))
+      (should (= (align-buffer-pad-hangs pad) (align-buffer-pad-anchor pad)))
+      ;; The three rows, drawn above the first line's own text.
+      (should (= (align-buffer--offset-in window two) (+ before (* 3 height))))
+      (should (= (align-buffer--pad-top window pad) 0)))))
+
+
+(ert-deftest align-buffer-pads-test-the-row-point-is-on-is-measured-whole ()
+  "The row point is on is measured from where that row begins.
+
+A span to a position part way along a row is measured as far as the bottom of
+that row, which reads as the row below it: whatever is levelled against the
+line the reader is on would be put a row under it."
+  (align-buffer-pads-tests--with-session "one
+two three
+four
+"
+      "one
+two three
+four
+"
+      '((1 . 1) (2 . 2) (3 . 3))
+    (let ((window (get-buffer-window left)))
+      (with-current-buffer left
+        (goto-char (align-buffer-line-position left 2))
+        (forward-char 4)
+        (set-window-point window (point)))
+      ;; The row point is on is the second line's own row, wherever along it
+      ;; point sits.
+      (should (= (align-buffer--point-row-top window)
+                 (align-buffer--offset-in
+                  window (align-buffer-line-position left 2))))
+      ;; And that is not what measuring to point itself gives.
+      (should (< (align-buffer--point-row-top window)
+                 (align-buffer--offset-in window (window-point window)))))))
+
 ;;; Walking a pad
 
 (ert-deftest align-buffer-pads-test-walking-moves-the-cursor-not-point ()

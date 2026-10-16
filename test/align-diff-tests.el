@@ -429,6 +429,50 @@ ours is a pad it recognises."
         (should (equal (cdr align-buffer--walked) 1))
         (should (= (line-number-at-pos (point)) 1))))))
 
+(ert-deftest align-diff-test-a-hunk-is-a-section-of-the-session ()
+  "The hunks are what the session gives align-buffer to navigate between.
+A hunk with lines on one side only counts none on the other, which is how a
+section says the side has them nowhere."
+  (align-diff-tests--with-session
+      "one\ntwo\nthree\nfour\nfive\n"
+      "one\nadded\ntwo\nthree\nCHANGED\nfive\n"
+    (should (equal (align-buffer-session-sections session)
+                   '((2 0 2 1) (4 1 5 1))))
+    (with-current-buffer new
+      (goto-char (point-max))
+      (insert "six\n"))
+    (align-diff-refresh session)
+    (should (equal (align-buffer-session-sections session)
+                   '((2 0 2 1) (4 1 5 1) (6 0 7 1))))))
+
+(ert-deftest align-diff-test-section-navigation-moves-hunk-to-hunk ()
+  "Moving section to section takes the reader from one hunk to the next.
+The moving itself is align-buffer's; what is checked here is that a hunk of
+ours is a section it can move to, from either pane, the pad of a one-sided
+hunk included."
+  (let ((align-diff-gap-marker 'pad))
+    (align-diff-tests--with-session
+        "one\ntwo\nthree\nfour\nfive\n"
+        "one\nadded\ntwo\nthree\nCHANGED\nfive\n"
+      (with-selected-window (get-buffer-window new)
+        (goto-char (point-min))
+        (call-interactively #'align-buffer-next-section)
+        (should (= (line-number-at-pos (point)) 2))
+        (call-interactively #'align-buffer-next-section)
+        (should (= (line-number-at-pos (point)) 5)))
+      (with-selected-window (get-buffer-window old)
+        (goto-char (point-min))
+        ;; The old pane has none of the added line, so what it stops on is the
+        ;; first row of the pad standing for it.
+        (call-interactively #'align-buffer-next-section)
+        (should (eq (car align-buffer--walked)
+                    (align-diff-tests--gap-overlay old)))
+        (should (equal (cdr align-buffer--walked) 0))
+        (call-interactively #'align-buffer-next-section)
+        (should (null align-buffer--walked))
+        (should (= (line-number-at-pos (point)) 4))
+        (should-error (align-buffer-next-section) :type 'user-error)))))
+
 (ert-deftest align-diff-test-a-mark-takes-no-position-in-the-buffer ()
   "The marks are display, so the text is the reader's own, untouched."
   (align-diff-tests--with-session "one\ngone\ntwo\n" "one\ntwo\n"

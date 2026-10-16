@@ -115,6 +115,13 @@ drawn, or is nil where the scroll is free to carry the cursor with the text.")
 For a consumer whose cursor is somewhere other than point; a nil answer
 leaves it to be measured from point itself.")
 
+(defvar align-buffer-uncounted-height-function nil
+  "A function saying what height a span begins inside and is not measured as.
+Called with the window and the span's lower and upper position.  For a
+consumer drawing rows that hang between two lines: a span beginning inside
+such a block is measured as none of the rows, which are drawn below where it
+begins all the same.  A nil answer adds nothing.")
+
 (defvar align-buffer--scrolled-view nil
   "The view the last scroll of ours settled on, as (WINDOW START . LIFT).")
 
@@ -164,6 +171,12 @@ a timer of no delay can run before that redisplay rather than after.")
 (defvar-local align-buffer--last-lift nil
   "Lift this buffer's window had when we last looked.")
 
+(defvar-local align-buffer--last-point nil
+  "Where point was in this buffer when we last looked.")
+
+(defvar-local align-buffer--last-tick nil
+  "This buffer's text counter when we last looked.")
+
 
 (defvar align-buffer--last-window nil
   "The window the last command ran in, so that entering the other pane is seen.")
@@ -187,7 +200,14 @@ a timer of no delay can run before that redisplay rather than after.")
   ;; measurement that moved with the lift already applied would have every lift
   ;; chasing the last one.
   (+ (cdr (window-text-pixel-size window (min from to) (max from to)))
-     (window-vscroll window t)))
+     (window-vscroll window t)
+     (align-buffer--uncounted-height window (min from to) (max from to))))
+
+(defun align-buffer--uncounted-height (window from to)
+  "Return what WINDOW draws between FROM and TO that the span misses."
+  (or (and align-buffer-uncounted-height-function
+           (funcall align-buffer-uncounted-height-function window from to))
+      0))
 
 (defun align-buffer--hanging-height (window position)
   "Return the height of what hangs at POSITION above the text there.
@@ -246,13 +266,18 @@ away when nothing does.  `align-buffer-scroll-rows' brings point along."
                 (setq height (align-buffer-line-display-height window start))
                 (setq next (align-buffer--line-after start)))
               ;; Nothing below to scroll into, so the lift goes no further
-              ;; than brings the last line's own text to the top of the
-              ;; window: that is as far as a reader can scroll, and lifting
-              ;; past it leaves them an empty window.  What hangs on that
-              ;; line is still scrolled through, a pad's rows included.
+              ;; than leaves the last of what that line is drawn as on the
+              ;; top row: lifting past that leaves an empty window, which is
+              ;; further than a reader can scroll.  Everything the line is
+              ;; drawn as counts, the rows of a pad hanging off the end of it
+              ;; included, so a run the other side alone has at the very end
+              ;; is scrolled through like any other.
               (unless next
                 (setq want
-                      (min want (align-buffer--hanging-height window start)))))
+                      (min want
+                           (max 0 (- (align-buffer-line-display-height
+                                      window start)
+                                     (align-buffer--row-height window)))))))
           (let ((previous (align-buffer--line-before start)))
             (while (and previous (< want 0))
               (setq start previous)
@@ -288,7 +313,13 @@ less the margin, and a line left in that band is one redisplay scrolls the
 window to get out of."
   (let* ((height (align-buffer--row-height window))
          (margin (align-buffer-effective-margin window))
-         (rows (window-body-height window)))
+         ;; Counted with the height the band is measured in, not with
+         ;; `window-body-height', which divides by the frame's own default: a
+         ;; buffer whose rows are taller than that - `line-spacing', a taller
+         ;; default face - draws fewer rows than the window reports, and a
+         ;; band built on the reported number reaches past the rows the margin
+         ;; protects, leaving a line deep inside it called clear.
+         (rows (max 1 (/ (window-body-height window t) height))))
     (cons (* margin height)
           (* (max 1 (- rows margin)) height))))
 
@@ -557,8 +588,9 @@ covers at most a windowful."
       ;; Everything above POSITION's own row, which is what the rows before it
       ;; in the window come to, including any an overlay hangs there.
       (let* ((limit (* (1+ height) row-height))
-             (pixels (cdr (window-text-pixel-size window start position
-                                                  nil limit)))
+             (pixels (+ (cdr (window-text-pixel-size window start position
+                                                     nil limit))
+                        (align-buffer--uncounted-height window start position)))
              (row (round pixels row-height)))
         (when (< row height) row)))))
 
@@ -724,9 +756,14 @@ of either edge, so there is nothing further coming to allow for."
         (height (max 1 (window-body-height window))))
     (if (< position start)
         0
-      (max 0 (cdr (window-text-pixel-size
-                   window start position nil
-                   (* (1+ height) (align-buffer--row-height window))))))))
+      ;; Bounded, so that a position far below the window costs a windowful of
+      ;; measurement rather than the whole buffer, and with whatever the span
+      ;; begins inside added back: a window starting inside a block of rows
+      ;; draws those rows below its top without the span counting any of them.
+      (max 0 (+ (cdr (window-text-pixel-size
+                      window start position nil
+                      (* (1+ height) (align-buffer--row-height window))))
+                (align-buffer--uncounted-height window start position))))))
 
 
 ;;; What the follower has to show
@@ -1196,6 +1233,7 @@ about to move anywhere."
              (start (window-start window))
              (lift (window-vscroll window t))
              (line (line-beginning-position))
+             (tick (buffer-chars-modified-tick))
              ;; Entering the pane is a move of the reader's like any other,
              ;; and the one that changes which pair speaks for the two: level
              ;; on the line they have left is not level on the line they are
@@ -1210,6 +1248,13 @@ about to move anywhere."
         ;; only signal that one is about to happen; and the lift because a
         ;; line that wraps is crossed a row at a time by the lift alone,
         ;; which moves the pair without touching either of the other two.
+        ;;
+        ;; Point itself is watched too, but only where the text has not
+        ;; changed: typing moves point on every keystroke and must still cost
+        ;; nothing, while a move of the reader's that leaves the line and the
+        ;; view alone - a row at a time down a line that wraps, a column -
+        ;; is a move the facing pane has to be placed from all the same, or
+        ;; whatever it was left holding stays until something larger moves.
         (when (and (not ours)
                    (or entered
                        (null align-buffer--last-start)
@@ -1217,7 +1262,10 @@ about to move anywhere."
                        (null align-buffer--last-lift)
                        (/= lift align-buffer--last-lift)
                        (null align-buffer--last-line-beginning)
-                       (/= line align-buffer--last-line-beginning)))
+                       (/= line align-buffer--last-line-beginning)
+                       (null align-buffer--last-point)
+                       (and (eql tick align-buffer--last-tick)
+                            (/= (point) align-buffer--last-point))))
           (let ((session (align-buffer-current-session)))
             (when (and session
                        (window-live-p (align-buffer--follower
@@ -1266,6 +1314,8 @@ about to move anywhere."
         (setq align-buffer--last-start (window-start window))
         (setq align-buffer--last-lift (window-vscroll window t))
         (setq align-buffer--last-line-beginning (line-beginning-position))
+        (setq align-buffer--last-point (point))
+        (setq align-buffer--last-tick (buffer-chars-modified-tick))
         (setq align-buffer--last-window window)))))
 
 (defun align-buffer-sync-enable ()

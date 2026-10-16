@@ -29,6 +29,10 @@
 ;; leaves every line facing either its own counterpart or a row standing in for
 ;; it.  The rows are walked and scrolled through like lines of their own.
 ;;
+;; Which stretches of the two buffers are worth moving between is the
+;; consumer's as well: it names them with `align-buffer-set-sections', and
+;; `align-buffer-next-section' takes the reader from one to the next.
+;;
 ;; This file owns the lifecycle: set up, change the correspondence, tear down,
 ;; and the hooks a consumer uses to put the windows where it wants them.
 
@@ -37,6 +41,7 @@
 (require 'align-buffer-core)
 (require 'align-buffer-sync)
 (require 'align-buffer-pads)
+(require 'align-buffer-sections)
 
 (defcustom align-buffer-layout-function #'align-buffer-layout-side-by-side
   "Function laying out a session's two buffers.

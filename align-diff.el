@@ -22,6 +22,11 @@
 ;; anywhere, so the text under them is the reader's own buffer with its mode,
 ;; its font lock and its editing intact.
 ;;
+;; Each hunk is one of the session's sections, so `align-buffer-next-section'
+;; and `align-buffer-previous-section' take the reader hunk to hunk, and a
+;; consumer handles running out of them through
+;; `align-buffer-section-boundary-functions'.
+;;
 ;; Editing is therefore allowed, and moves the diff: once both buffers have
 ;; been left alone for `align-diff-idle-delay', the diff is run again, the
 ;; colours are painted afresh, and the windows are brought level again if the
@@ -558,7 +563,7 @@ lines corresponding as they were colours them where they stand."
            (pairs (align-diff--pairs hunks old new)))
       (align-diff--set-property session :align-diff-ticks
                                 (align-diff--ticks session))
-      (align-diff--set-property session :align-diff-hunks hunks)
+      (align-buffer-set-sections session hunks)
       (unless (equal pairs (align-diff--property session :align-diff-pairs))
         (align-diff--set-property session :align-diff-pairs pairs)
         (align-buffer-set-pairs session pairs))
@@ -624,7 +629,7 @@ PROPERTIES are carried on the session.  Return the session."
            (session (align-buffer-show
                      old new pairs
                      (append (list :align-diff t) properties))))
-      (align-diff--set-property session :align-diff-hunks hunks)
+      (align-buffer-set-sections session hunks)
       (align-diff--set-property session :align-diff-pairs pairs)
       (align-diff--set-property session :align-diff-ticks
                                 (align-diff--ticks session))

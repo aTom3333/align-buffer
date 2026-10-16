@@ -13,12 +13,14 @@
 ;; facing pane.
 ;;
 ;; Needs a graphical frame, so it is not an ert suite in batch.  Run with:
-;;   emacs -Q -L . -L test -l test/align-diff-integration.el \
+;;   emacs -Q --iconic -L . -L test -l test/align-diff-integration.el \
 ;;         -f align-diff-integration-batch
 
 ;;; Code:
 
 (require 'align-diff)
+(require 'align-diff-demo)
+(require 'align-buffer-background)
 (require 'cl-lib)
 
 (defvar align-diff-integration--failures nil
@@ -254,8 +256,11 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--stand session 'left
                                    (- align-diff-integration--at 1))
     (align-diff-integration--keys "<down>" 4)
+    ;; The line the rows hang after, which is where point waits for as long as
+    ;; one of them is read: that is the place they are drawn at, and a row
+    ;; carries the cursor only while point is there.
     (align-diff-integration--expect
-     "point's line" align-diff-integration--at
+     "point's line" (1- align-diff-integration--at)
      (align-buffer-line-at (align-buffer-buffer session 'left)
                            (point)))
     (align-diff-integration--expect "the row walked to" 3
@@ -349,10 +354,17 @@ buffer's own rule for leaving the panes alone."
     (align-diff-integration--quit session)))
 
 (align-diff-integration-defscenario a-page-up-into-a-pad-reads-one-of-its-rows
-  (let ((session (align-diff-integration--session)))
+  ;; Paged up until the pad is reached rather than once: how many lines stand
+  ;; between the reader and the pad is the shape of the fixture, and what the
+  ;; scenario is about is the press that arrives.
+  (let ((session (align-diff-integration--session))
+        (pages 0))
     (align-diff-integration--stand session 'left
                                    align-diff-integration--below)
-    (align-diff-integration--keys "M-v")
+    (while (and (< pages 6)
+                (not (integerp (align-diff-integration--walked session 'left))))
+      (align-diff-integration--keys "M-v")
+      (setq pages (1+ pages)))
     (align-diff-integration--expect
      "a row of the pad is being read" t
      (integerp (align-diff-integration--walked session 'left)))
@@ -598,6 +610,275 @@ buffer's own rule for leaving the panes alone."
      (align-diff-integration--pair-out-by session 'right))
     (align-diff-integration--quit session)))
 
+(align-diff-integration-defscenario a-start-inside-a-pad-measures-the-rows
+  ;; A start can land on the one character a pad's rows hang on, there being
+  ;; no row boundary inside the rows for `recenter' to take instead, and the
+  ;; rows are then drawn from the top of the window.  A span measured from
+  ;; there is measured as none of them, so where a line below them is drawn
+  ;; has to be put back rather than taken from the measurement.
+  (let* ((session (align-diff-integration--several))
+         (buffer (align-buffer-buffer session 'left))
+         (window (get-buffer-window buffer))
+         (pad (align-diff-integration--pad session 'left))
+         (below (align-buffer-pad-anchor pad)))
+    (align-diff-integration--stand session 'left
+                                   (align-buffer-line-at buffer below))
+    ;; A few rows above the line the rows hang in front of, which are rows of
+    ;; the pad: there is no row boundary among them to take as a start, so the
+    ;; character they hang on is taken and the window is lifted through them.
+    (recenter 3)
+    (redisplay t)
+    (align-diff-integration--expect
+     "the start is the character the rows hang on" t
+     (= (window-start window) (align-buffer-pad-hangs pad)))
+    (align-diff-integration--expect
+     "where the line below the rows is drawn"
+     (cdr (posn-x-y (posn-at-point below window)))
+     (align-buffer--offset-in window below))
+    (align-diff-integration--expect
+     "where the first of the rows is drawn"
+     (align-buffer--row-height window)
+     (align-buffer--pad-top window pad))
+    (align-diff-integration--quit session)))
+
+
+;;; Moving hunk to hunk, over a diff with several of them
+
+;; The session above has one hunk, which says nothing about going from one to
+;; the next.  These build a diff with three: a stretch both sides have and
+;; write differently, a run the new side alone has, and a run the old side
+;; alone has.  So each pane stops on its own lines at one of them and on the
+;; rows standing for the other side's lines at another.
+
+(defconst align-diff-integration--hunks 3
+  "How many hunks the session with several of them has.")
+
+(defun align-diff-integration--several ()
+  "Show two buffers differing in three places, and return the session."
+  (delete-other-windows)
+  (let* ((shared (lambda (from to)
+                   (cl-loop for line from from to to
+                            collect (format "shared line %03d" line))))
+         (run (lambda (what)
+                (cl-loop for line from 1 to 8
+                         collect (format "%s only %03d" what line))))
+         (old (generate-new-buffer " *align-diff several old*"))
+         (new (generate-new-buffer " *align-diff several new*")))
+    (with-current-buffer old
+      (insert (align-diff-integration--text
+               (append (funcall shared 1 30)
+                       '("written one way A" "written one way B")
+                       (funcall shared 33 60)
+                       (funcall shared 61 90)
+                       (funcall run "the old side")
+                       (funcall shared 91 120))))
+      (set-buffer-modified-p nil))
+    (with-current-buffer new
+      (insert (align-diff-integration--text
+               (append (funcall shared 1 30)
+                       '("written the other way A" "written the other way B")
+                       (funcall shared 33 60)
+                       (funcall run "the new side")
+                       (funcall shared 61 90)
+                       (funcall shared 91 120))))
+      (set-buffer-modified-p nil))
+    (setq align-diff-gap-marker 'pad)
+    (setq align-diff-refine-hunks nil)
+    (setq align-diff-idle-delay nil)
+    (setq align-buffer-exact-alignment t)
+    (let ((session (align-diff-buffers old new
+                                       (list :owned-buffers (list old new)))))
+      (dolist (side '(left right))
+        (with-current-buffer (align-buffer-buffer session side)
+          (local-set-key (kbd "C-c n") #'align-buffer-next-section)
+          (local-set-key (kbd "C-c p") #'align-buffer-previous-section)))
+      (align-diff-integration--settle)
+      session)))
+
+(defun align-diff-integration--stop (session side)
+  "Return where the reader stands in SESSION's SIDE and how level it reads.
+A row of a pad where one is being read, and a line of the text otherwise, with
+how far out of level that row or that line's pair is drawn."
+  (let ((walked (align-diff-integration--walked session side)))
+    (if walked
+        (list :row walked
+              :out-by (align-diff-integration--out-by session side))
+      (list :line (align-buffer-line-at (align-buffer-buffer session side)
+                                        (point))
+            :out-by (align-diff-integration--pair-out-by session side)))))
+
+(defun align-diff-integration--stop-name (stop)
+  "Return what STOP stands at: a line of the text, or a row of a pad."
+  (or (plist-get stop :line) (list 'row (plist-get stop :row))))
+
+(defun align-diff-integration--press-sections (session side keys &optional most)
+  "Press KEYS in SESSION's SIDE until the move is refused, and return the stops.
+A move with nowhere left to go signals, which is how the end is found.  MOST
+stops the walk where no refusal comes, and defaults to eight."
+  (align-diff-integration--stand session side 1)
+  (let ((stops nil)
+        (more t))
+    (while (and more (< (length stops) (or most 8)))
+      (condition-case nil
+          (progn (align-diff-integration--keys keys)
+                 (push (align-diff-integration--stop session side) stops))
+        (user-error (setq more nil))))
+    (nreverse stops)))
+
+(align-diff-integration-defscenario every-hunk-of-a-diff-is-a-section
+  (let ((session (align-diff-integration--several)))
+    (align-diff-integration--expect
+     "sections" align-diff-integration--hunks
+     (length (align-buffer-session-sections session)))
+    ;; One of them the old side has no lines of and one the new side has none
+    ;; of, which is what gives each pane a stop on rows rather than on lines.
+    (align-diff-integration--expect
+     "sections with lines on one side only" 2
+     (seq-count (lambda (section)
+                  (or (zerop (align-buffer-section-count section 'left))
+                      (zerop (align-buffer-section-count section 'right))))
+                (align-buffer-session-sections session)))
+    (align-diff-integration--quit session)))
+
+(align-diff-integration-defscenario every-hunk-is-reached-and-reads-level
+  (let* ((session (align-diff-integration--several))
+         (stops (align-diff-integration--press-sections session 'left "C-c n")))
+    (align-diff-integration--expect "hunks stopped at"
+                                    align-diff-integration--hunks
+                                    (length stops))
+    ;; One of the three is a run the old side has not got, so the old pane
+    ;; stops on the rows standing for it rather than on a line of its own.
+    (align-diff-integration--expect
+     "stops on a pad's rows" 1
+     (seq-count (lambda (stop) (plist-get stop :row)) stops))
+    (align-diff-integration--expect
+     "stops drawn out of level" nil
+     (seq-filter (lambda (stop)
+                   (let ((out (plist-get stop :out-by)))
+                     (and out (not (zerop out)))))
+                 stops))
+    (align-diff-integration--quit session)))
+
+(align-diff-integration-defscenario going-back-retraces-the-hunks
+  (let* ((session (align-diff-integration--several))
+         (down (align-diff-integration--press-sections session 'right "C-c n"))
+         (up nil))
+    ;; From the last one, back up: the stops are the ones on the way down,
+    ;; reversed and without the one being stood on.
+    (let ((more t))
+      (while (and more (< (length up) 8))
+        (condition-case nil
+            (progn (align-diff-integration--keys "C-c p")
+                   (push (align-diff-integration--stop session 'right) up))
+          (user-error (setq more nil)))))
+    (align-diff-integration--expect
+     "the way back"
+     (cdr (reverse (mapcar #'align-diff-integration--stop-name down)))
+     (mapcar #'align-diff-integration--stop-name (nreverse up)))
+    (align-diff-integration--quit session)))
+
+(align-diff-integration-defscenario arrows-walk-on-from-a-section-move
+  ;; The two features over one another: a move to a hunk the pane has no lines
+  ;; of leaves the reader on the first row of its pad, and the arrows walk the
+  ;; rest of the rows from there.
+  (let ((session (align-diff-integration--several)))
+    (align-diff-integration--stand session 'left 1)
+    (let ((rows nil))
+      (while (and (null (align-diff-integration--walked session 'left))
+                  (< (length rows) 8))
+        (align-diff-integration--keys "C-c n")
+        (push t rows)))
+    (align-diff-integration--expect
+     "the row the move landed on" 0
+     (align-diff-integration--walked session 'left))
+    (align-diff-integration--keys "<down>")
+    (align-diff-integration--expect
+     "the row after one arrow" 1
+     (align-diff-integration--walked session 'left))
+    (align-diff-integration--expect "out of level by" 0
+                                    (align-diff-integration--out-by session
+                                                                    'left))
+    (align-diff-integration--keys "<up>")
+    (align-diff-integration--expect
+     "the row after going back up" 0
+     (align-diff-integration--walked session 'left))
+    (align-diff-integration--quit session)))
+
+(align-diff-integration-defscenario the-last-hunk-hands-the-boundary-over
+  (let ((session (align-diff-integration--several))
+        (calls nil))
+    ;; To the last hunk first, with nobody handling the boundary: a handler
+    ;; that takes it leaves the command quiet, and there would then be nothing
+    ;; to say the end had been reached.
+    (align-diff-integration--press-sections session 'right "C-c n")
+    (let ((align-buffer-section-boundary-functions
+           (list (lambda (boundary remaining)
+                   (push (cons (eq boundary session) remaining) calls)
+                   t))))
+      ;; Standing on the last hunk, the press after it is the one the handler
+      ;; takes, and the reader is left where they were.
+      (let ((was (align-diff-integration--stop session 'right)))
+        (align-diff-integration--keys "C-c n")
+        (align-diff-integration--expect "the handler was called" '((t . 1))
+                                        calls)
+        (align-diff-integration--expect "the reader stayed put" was
+                                        (align-diff-integration--stop session
+                                                                      'right))))
+    (align-diff-integration--quit session)))
+
+
+(defun align-diff-integration--demo ()
+  "Return a session over the demo's own diff, with the section keys bound.
+Thirteen hunks, two of them runs taller than a window, and a changed line
+whose two versions wrap to a different number of rows."
+  (setq align-diff-gap-marker 'pad)
+  (setq align-diff-idle-delay nil)
+  (let ((session (align-diff-demo)))
+    (dolist (side '(left right))
+      (with-current-buffer (align-buffer-buffer session side)
+        (local-set-key (kbd "C-c n") #'align-buffer-next-section)
+        (local-set-key (kbd "C-c p") #'align-buffer-previous-section)))
+    (align-diff-integration--settle)
+    session))
+
+(defun align-diff-integration--quit-demo (session)
+  "Take the demo SESSION apart and take its buffers with it."
+  (let ((buffers (list (align-buffer-buffer session 'left)
+                       (align-buffer-buffer session 'right))))
+    (align-diff-integration--quit session)
+    (mapc #'kill-buffer buffers)))
+
+(align-diff-integration-defscenario every-hunk-of-the-demo-is-level
+  ;; The whole feature over the fixture the reader looks at: hunks of every
+  ;; shape, among them two runs taller than a window, which a pad of its own
+  ;; height stands against.
+  (let ((session (align-diff-integration--demo)))
+    (dolist (side '(left right))
+      (let ((stops (align-diff-integration--press-sections session side
+                                                           "C-c n" 20)))
+        (align-diff-integration--expect
+         (format "hunks stopped at from the %s" side)
+         (length (align-buffer-session-sections session))
+         (length stops))
+        ;; The runs one side alone has leave that pane on a pad's rows.
+        (align-diff-integration--expect
+         (format "stops on a pad's rows from the %s, at least one" side) t
+         (> (seq-count (lambda (stop) (plist-get stop :row)) stops) 0))
+        (align-diff-integration--expect
+         (format "stops drawn out of level from the %s" side) nil
+         (seq-filter (lambda (stop)
+                       (let ((out (plist-get stop :out-by)))
+                         (and out (not (zerop out)))))
+                     stops))
+        ;; And back to the top from the last hunk, which is the longest jump
+        ;; the session has in it.
+        (align-diff-integration--keys "M-<")
+        (align-diff-integration--expect
+         (format "level again at the top of the %s" side) 0
+         (plist-get (align-diff-integration--stop session side) :out-by))))
+    (align-diff-integration--quit-demo session)))
+
+
 (defun align-diff-integration--report-file ()
   "Return where to write the report."
   (or (getenv "ALIGN_DIFF_INTEGRATION_OUT")
@@ -614,8 +895,7 @@ buffer's own rule for leaving the panes alone."
     (run-with-idle-timer
      0.5 nil
      (lambda ()
-       (set-frame-parameter (selected-frame) 'fullscreen 'maximized)
-       (redisplay t)
+       (align-buffer-background-frame)
        (let* ((failures (align-diff-integration-run))
               (lines (cons (format "%d scenarios, %d failure(s)"
                                    (length align-diff-integration--scenarios)

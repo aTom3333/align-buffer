@@ -41,6 +41,10 @@ line pairs sorted by OWN, one for asking from each side.  LEFT-POINT and
 RIGHT-POINT are where point was when the session was built.  WINDOWS are the
 windows the layout put the buffers in.
 
+SECTIONS are the stretches of lines the consumer calls interesting, which is
+what `align-buffer-next-section' and `align-buffer-previous-section' move
+between.
+
 PROPERTIES is a plist the consumer keeps its own state in.  One key is read
 from it: `:owned-buffers', a list of buffers to kill when the session ends,
 for a consumer that made a buffer to show."
@@ -51,6 +55,7 @@ for a consumer that made a buffer to show."
   left-point
   right-point
   windows
+  sections
   properties)
 
 

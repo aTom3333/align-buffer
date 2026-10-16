@@ -26,15 +26,17 @@
 ;;
 ;; Run it with:
 ;;
-;;   emacs -Q -L . -L test -l test/align-buffer-integration.el \
+;;   emacs -Q --iconic -L . -L test -l test/align-buffer-integration.el \
 ;;         -f align-buffer-integration-batch
 ;;
-;; A frame appears for a second or two.  Each scenario prints a line, and the
-;; process exits non-zero if any assertion failed.
+;; Started with `--iconic', so the frame it runs in is the one it makes for
+;; itself, behind everything else and never focused.  Each scenario prints a
+;; line, and the process exits non-zero if any assertion failed.
 
 ;;; Code:
 
 (require 'align-buffer)
+(require 'align-buffer-background)
 (require 'cl-lib)
 
 (defvar align-buffer-integration--failures nil
@@ -595,6 +597,76 @@ and so gives where the line is drawn rather than what the span is worth."
     (align-buffer-quit session)))
 
 
+(align-buffer-integration-defscenario rows-at-the-very-end-are-scrolled-into
+  ;; A run the other side alone has at the end of the buffer hangs its rows off
+  ;; the last line.  A scroll that stopped at that line's own text would leave
+  ;; them unreachable, so it goes on through everything the line is drawn as.
+  (let* ((session (align-buffer-integration--session))
+         (buffer (align-buffer-session-left-buffer session))
+         (window (get-buffer-window buffer))
+         (pad (with-current-buffer buffer
+                (align-buffer-pad-add buffer (point-max) 8
+                                      'font-lock-string-face
+                                      (align-buffer-session-right-buffer
+                                       session)
+                                      300)))
+         (height (align-buffer--row-height window)))
+    (select-window window)
+    (with-current-buffer buffer (goto-char (point-max)))
+    (align-buffer-integration--settle)
+    ;; Further than the text alone goes, a few rows at a time, which is what
+    ;; the reader's own scroll does.
+    (dotimes (_ 30) (align-buffer-scroll window (* 3 height)))
+    (align-buffer-integration--expect
+     'rows-at-the-very-end-are-scrolled-into "the view is inside the rows" t
+     (< (align-buffer--pad-top window pad) 0))
+    (align-buffer-integration--expect
+     'rows-at-the-very-end-are-scrolled-into "and stays there" t
+     (let ((was (align-buffer--pad-top window pad)))
+       (redisplay t)
+       (= was (align-buffer--pad-top window pad))))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario marked-stretches-are-moved-between
+  ;; The stretches worth stopping at are the consumer's to name, and this
+  ;; correspondence holds what no diff could: a block of the left that moved
+  ;; to the end of the right.  So the move from one stretch to the next has to
+  ;; carry the panes across a pair that runs backwards, and leave them level
+  ;; on the other side of it.
+  (let ((session (align-buffer-integration--session))
+        (stops nil))
+    ;; The run of forty the left alone has, in front of right line 101, and
+    ;; the block that moved, which both sides have far apart.
+    (align-buffer-set-sections session '((101 40 101 0) (201 20 280 20)))
+    (dolist (side '(left right))
+      (with-current-buffer (align-buffer-buffer session side)
+        (local-set-key (kbd "C-c n") #'align-buffer-next-section)
+        (local-set-key (kbd "C-c p") #'align-buffer-previous-section)))
+    (align-buffer-integration--go session 'left 1)
+    (dotimes (_ 2)
+      (align-buffer-integration--keys "C-c n")
+      (push (list (align-buffer-line-at
+                   (align-buffer-session-left-buffer session)
+                   (window-point (get-buffer-window
+                                  (align-buffer-session-left-buffer session))))
+                  (align-buffer-integration--level-p session))
+            stops))
+    (align-buffer-integration--expect
+     'marked-stretches-are-moved-between "the two stretches, read level"
+     '((101 t) (201 t)) (nreverse stops))
+    ;; And back, which has to cross the moved block the other way.
+    (align-buffer-integration--keys "C-c p")
+    (align-buffer-integration--expect
+     'marked-stretches-are-moved-between "back to the first, read level"
+     '(101 t)
+     (list (align-buffer-line-at
+            (align-buffer-session-left-buffer session)
+            (window-point (get-buffer-window
+                           (align-buffer-session-left-buffer session))))
+           (align-buffer-integration--level-p session)))
+    (align-buffer-quit session)))
+
+
 ;;; Running
 
 (defun align-buffer-integration-configure ()
@@ -832,6 +904,7 @@ And two are caught by nothing here:
     (run-with-idle-timer
      0.5 nil
      (lambda ()
+       (align-buffer-background-frame)
        (let* ((failures (align-buffer-integration-run))
               (lines (append
                       (list (format "%d scenarios, %d failure(s)"
