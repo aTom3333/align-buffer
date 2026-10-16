@@ -101,26 +101,26 @@ like, and is marked."
 ;;; Where we are, and where the keys should take us
 
 (defun align-diff-sweep--pad-rows (buffer line)
-  "Return how many rows the pad hanging above LINE in BUFFER has, or nil."
-  (let ((position (align-buffer-line-position buffer line)))
-    (when position
-      (with-current-buffer buffer
-        (let ((pad (seq-find (lambda (overlay)
-                               (overlay-get overlay 'align-buffer-pad-rows))
-                             (overlays-in position position))))
-          (and pad (align-buffer-pad-rows pad)))))))
+  "Return how many rows the pad hanging after LINE in BUFFER has, or nil.
+Looked for the way the package looks for one, over the newline the rows hang
+off rather than at the beginning of the line they are drawn in front of."
+  (let* ((next (align-buffer-line-position buffer (1+ line)))
+         (pad (and next (align-buffer-pad-at next buffer))))
+    (and pad (align-buffer-pad-rows pad))))
 
 (defun align-diff-sweep--places (buffer from to)
   "Return every place the arrows should visit in BUFFER from line FROM to TO.
-A place is (LINE . ROW), ROW being the row of the pad hanging above LINE, or
-nil for the line's own text.  The pad above FROM is left out: a sweep starting
-there starts on the line itself."
-  (let ((places (list (cons from nil))))
-    (cl-loop for line from (1+ from) to to
-             do (let ((rows (align-diff-sweep--pad-rows buffer line)))
-                  (dotimes (row (or rows 0))
-                    (push (cons line row) places))
-                  (push (cons line nil) places)))
+A place is (LINE . ROW), ROW being a row of the pad hanging after LINE, or nil
+for the line's own text.  Point waits on the line a pad hangs after for as long
+as its rows are read, so the rows are named by that line and come after it."
+  (let ((places nil))
+    (cl-loop for line from from to to
+             do (push (cons line nil) places)
+                ;; Not past the end of the range: the rows after the last line
+                ;; of it are outside what this sweep walks.
+                (when (< line to)
+                  (dotimes (row (or (align-diff-sweep--pad-rows buffer line) 0))
+                    (push (cons line row) places))))
     (nreverse places)))
 
 (defun align-diff-sweep--place (buffer)
@@ -216,15 +216,16 @@ a pair the leader is no longer showing, which is align-buffer's own rule."
     (if walked
         (pcase-let* ((`(,overlay . ,row) walked)
                      (facing (overlay-get overlay 'align-buffer-pad-facing))
-                     (first (overlay-get overlay 'align-buffer-pad-facing-line))
+                     (line (align-buffer-pad-facing-line overlay row))
                      (other (and (buffer-live-p facing)
                                  (get-buffer-window facing))))
-          (when (and other first)
+          (when (and other line)
             (let ((wanted (+ (align-buffer--pad-top window overlay)
-                             (* row (align-buffer--row-height window))))
-                  (drawn (align-buffer--offset-in
-                          other (align-buffer-line-position facing
-                                                            (+ first row)))))
+                             (align-buffer--pad-above window overlay row)))
+                  (drawn (+ (align-buffer--offset-in
+                             other (align-buffer-line-position facing line))
+                            (* (- row (align-buffer-pad-text-row overlay line))
+                               (align-buffer--row-height other)))))
               (- drawn wanted))))
       ;; Read from the window rather than from point: a press may have left
       ;; the reader in the other pane, and this one is still the side asked
@@ -327,10 +328,22 @@ own text to the top, which is as far as a scroll of ours goes."
                               (format "%s px, %s" out
                                       (align-diff-sweep--panes session))))))
 
+(defun align-diff-sweep--input (key)
+  "Return KEY as the input to send for it.
+A wheel notch carries the window it was turned over and a count of one, which
+no key description can say and which `mwheel' reads: a notch without them
+scrolls by whatever it last settled on, which is the length of the buffer."
+  (if (member key '("<wheel-down>" "<wheel-up>"))
+      (let ((window (selected-window)))
+        (vector (list (intern (substring key 1 -1))
+                      (list window (window-start window) '(0 . 0) 0)
+                      1)))
+    (kbd key)))
+
 (defun align-diff-sweep--press (key)
   "Send KEY as real input, and return the error it raised, or nil."
   (condition-case error
-      (progn (execute-kbd-macro (kbd key)) nil)
+      (progn (execute-kbd-macro (align-diff-sweep--input key)) nil)
     (error error)))
 
 (defun align-diff-sweep--rows-of-line (window position)
@@ -430,7 +443,12 @@ measurement the window's own lift cancels out of."
                                  (align-diff-sweep--press key))))
              (align-diff-sweep--settle)
              (let* ((travelled (- before (align-buffer--offset-in window mark))))
-               (when raised
+               ;; The two ends of the buffer are where a scroll sweep
+               ;; finishes, and a scroll command says it has reached one by
+               ;; signalling, which is what it is meant to do.
+               (when (and raised
+                          (not (memq (car raised) '(beginning-of-buffer
+                                                    end-of-buffer))))
                  (align-diff-sweep--note 'raised where nil
                                          (format "%S" raised)))
                (when (and (if (> wanted 0)
@@ -476,13 +494,14 @@ measurement the window's own lift cancels out of."
       (align-diff-sweep--scroll session side (car key) (cdr key)))))
 
 (defvar align-diff-sweep--commands
-  '(("M->" . nil) ("M-<" . nil) ("C-f" . nil) ("C-b" . nil) ("C-e" . nil)
-    ("C-l" . nil) ("M-g M-g 150 RET" . nil) ("M-r" . nil)
-    ("C-s samples RET" . nil) ("C-M-v" . nil) ("C-x o" . nil)
-    ("C-u 5 <down>" . 5) ("C-u 5 <up>" . -5))
+  '(("M->") ("M-<") ("C-f") ("C-b") ("C-e")
+    ("C-l") ("M-g M-g 150 RET") ("M-r")
+    ("C-s samples RET") ("C-M-v") ("C-x o")
+    ("C-u 5 <down>" 5 "<down>") ("C-u 5 <up>" 5 "<up>"))
   "Keys that are neither a plain line move nor a scroll of the view.
-Each with how many places it should move where that is known, and nil where
-only the state it leaves behind can be judged.")
+A key carrying a count comes with that count and the key one press of it is,
+which is what the count promises to do: that many of those presses.  The rest
+carry nothing, only the state they leave behind being worth judging.")
 
 (defun align-diff-sweep--pad-lines (buffer)
   "Return the lines of BUFFER worth pressing an odd key on.
@@ -501,19 +520,26 @@ cross or to come out of, and the two ends of the buffer."
 
 (defun align-diff-sweep--commands-side (session side)
   "Press every odd key there is in SESSION's SIDE, from the places that matter."
-  (let* ((buffer (align-buffer-buffer session side))
-         (range (align-diff-sweep--range buffer))
-         (places (align-diff-sweep--places buffer (car range) (cdr range))))
+  (let ((buffer (align-buffer-buffer session side)))
     (dolist (line (align-diff-sweep--pad-lines buffer))
       (dolist (command align-diff-sweep--commands)
-        (align-diff-sweep--stand session side line)
+        ;; Where the key carries a count, what that many single presses reach
+        ;; is taken first, from the same place, and the counted press is then
+        ;; made from that place in its turn.
         (let* ((key (car command))
                (where (format "%s %s on line %s" side key line))
-               (from (align-diff-sweep--place buffer))
+               (wanted (when (cdr command)
+                         (align-diff-sweep--stand session side line)
+                         (dotimes (_ (nth 1 command))
+                           (align-diff-sweep--press (nth 2 command))
+                           (align-diff-sweep--settle))
+                         (align-diff-sweep--place buffer)))
+               (ignored (align-diff-sweep--stand session side line))
                (raised (progn
                          (setq align-diff-sweep--seen
                                (1+ align-diff-sweep--seen))
                          (align-diff-sweep--press key))))
+          (ignore ignored)
           (align-diff-sweep--settle)
           ;; The edges of the buffer are where these keys are pressed on
           ;; purpose, and a motion that runs into one says so by signalling,
@@ -527,12 +553,9 @@ cross or to come out of, and the two ends of the buffer."
                                (string-match-p "ringing the bell"
                                                (or (cadr raised) "")))))
             (align-diff-sweep--note 'raised where nil (format "%S" raised)))
-          (when (and (cdr command) (not raised))
-            (let* ((index (cl-position from places :test #'equal))
-                   (wanted (and index (nth (max 0 (+ index (cdr command)))
-                                           places)))
-                   (got (align-diff-sweep--place buffer)))
-              (when (and wanted (not (equal wanted got)))
+          (when (and wanted (not raised))
+            (let ((got (align-diff-sweep--place buffer)))
+              (unless (equal wanted got)
                 (align-diff-sweep--note 'wrong-place where wanted
                                         (format "got %S" got)))))
           (align-diff-sweep--note-flicker where)
@@ -543,9 +566,9 @@ cross or to come out of, and the two ends of the buffer."
                                            (format "%S" error)))))))))
 
 (defconst align-diff-sweep--evil-commands
-  '(("C-d" . nil) ("C-u" . nil) ("G" . nil) ("g g" . nil) ("}" . nil)
-    ("{" . nil) ("5 j" . 5) ("5 k" . -5))
-  "Evil keys that are not a plain line move, with the places they should move.")
+  '(("C-d") ("C-u") ("G") ("g g") ("}")
+    ("{") ("5 j" 5 "j") ("5 k" 5 "k"))
+  "Evil keys that are not a plain line move, shaped as the other odd keys are.")
 
 (defun align-diff-sweep--evil-side (session side)
   "Sweep SESSION's SIDE with evil's own keys, where evil is to be had.
@@ -580,22 +603,37 @@ presses are the check of that claim rather than a reading of its source."
       (with-current-buffer (align-buffer-buffer session one)
         (evil-local-mode -1)))))
 
+(defvar align-diff-sweep-line 1
+  "The line `align-diff-sweep-goto-line' goes to.")
+
+(defun align-diff-sweep-goto-line ()
+  "Go to the line the sweep has drawn."
+  (interactive)
+  (goto-char (align-buffer-line-position (current-buffer)
+                                         align-diff-sweep-line)))
+
 (defun align-diff-sweep--stand (session side line)
-  "Select SESSION's SIDE window with point on LINE, and let it settle."
+  "Select SESSION's SIDE window with point on LINE, and let it settle.
+
+Through a command bound to a key, which is the only way a reader ever stands
+anywhere: a point written from Lisp runs none of the hooks a press runs, so
+the view the last scroll settled on is never let go of, and the next press
+puts the window back where that scroll left it - the length of the buffer
+away."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer)))
     (select-window window)
-    (align-buffer--walk-away)
-    (with-current-buffer buffer
-      (goto-char (align-buffer-line-position buffer line))
-      (set-window-point window (point)))
-    (align-buffer-sync window)
-    ;; As a command of the reader's would leave it: a point put here from
-    ;; outside has had none of the keeping that every command does, and a pane
-    ;; left with its own point behind a lift is not a state any press reaches.
-    (redisplay t)
-    (align-buffer--keep-point-in-band window)
-    (align-diff-sweep--settle)))
+    (setq align-diff-sweep-line line)
+    (align-diff-sweep--press "C-c C-g")
+    (align-diff-sweep--settle)
+    ;; Standing is a promise of its own, and every other promise is read from
+    ;; where it left the reader: the command goes to LINE, so the reader is on
+    ;; LINE and on no row of a pad.
+    (let ((place (align-diff-sweep--place buffer)))
+      (unless (equal place (cons line nil))
+        (align-diff-sweep--note 'wrong-stand
+                                (format "%s standing on %s" side line)
+                                (cons line nil) (format "got %S" place))))))
 
 (defun align-diff-sweep--session ()
   "Show the demo with its hunks padded, and return the session."
@@ -611,7 +649,11 @@ presses are the check of that claim rather than a reading of its source."
   ;; they could take the notches from ours.
   (when (equal (getenv "ALIGN_DIFF_SWEEP_PIXEL") "yes")
     (pixel-scroll-precision-mode 1))
-  (align-diff-demo))
+  (let ((session (align-diff-demo)))
+    (dolist (side '(left right))
+      (with-current-buffer (align-buffer-buffer session side)
+        (local-set-key (kbd "C-c C-g") #'align-diff-sweep-goto-line)))
+    session))
 
 (defun align-diff-sweep--range (buffer)
   "Return the first and last line to sweep in BUFFER."

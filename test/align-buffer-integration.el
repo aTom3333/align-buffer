@@ -241,6 +241,14 @@ and so gives where the line is drawn rather than what the span is worth."
           (insert (make-string (* 2 (window-body-width window)) ?x)))
         (set-buffer-modified-p nil)))))
 
+(defun align-buffer-integration--above-top-p (session side line)
+  "Return non-nil when SESSION's SIDE window draws none of LINE, it being above.
+What several scenarios take for granted and a tall window does not give them:
+a line the reader has read past far enough for it to have left the top."
+  (let* ((buffer (align-buffer-buffer session side))
+         (window (get-buffer-window buffer)))
+    (< (align-buffer-line-position buffer line) (window-start window))))
+
 (defun align-buffer-integration--go (session side line)
   "Select SESSION's SIDE window and put point on LINE there, as a command would."
   (let ((window (get-buffer-window (align-buffer-buffer session side))))
@@ -397,14 +405,25 @@ and so gives where the line is drawn rather than what the span is worth."
     ;; last paired line, 100, has left the top of the leader: the follower is
     ;; then expected to hold that line at its own top rather than scrolling on
     ;; by the height of the run.
-    (align-buffer-integration--go session 'left 130)
-    (align-buffer-integration--expect
-     'an-unpaired-run-holds-the-follower "the follower waits on the last pair"
-     100 (align-buffer-integration--start session 'right))
+    ;;
+    ;; How deep that is depends on the window: a tall one still draws line 100
+    ;; from well inside the run, and the hold has not begun.  So the leader is
+    ;; taken to the far end of the run and the premise is checked rather than
+    ;; assumed.
     (align-buffer-integration--go session 'left 138)
-    (align-buffer-integration--expect
-     'an-unpaired-run-holds-the-follower "and reading further does not move it"
-     100 (align-buffer-integration--start session 'right))
+    (if (not (align-buffer-integration--above-top-p session 'left 100))
+        (align-buffer-integration--expect
+         'an-unpaired-run-holds-the-follower
+         "the window is tall enough to draw the last pair, so it is drawn"
+         t (align-buffer-integration--level-p session))
+      (align-buffer-integration--expect
+       'an-unpaired-run-holds-the-follower "the follower waits on the last pair"
+       100 (align-buffer-integration--start session 'right))
+      (align-buffer-integration--go session 'left 140)
+      (align-buffer-integration--expect
+       'an-unpaired-run-holds-the-follower
+       "and reading further does not move it"
+       100 (align-buffer-integration--start session 'right)))
     (align-buffer-quit session)))
 
 (align-buffer-integration-defscenario one-notch-on-each-window

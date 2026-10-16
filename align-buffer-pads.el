@@ -69,6 +69,63 @@ that it is painted too."
           (apply #'concat (make-list (1- rows) (align-buffer--pad-row face)))
           (propertize " " 'face face)))
 
+(defun align-buffer--pad-run-rows (facing facing-line lines)
+  "Return how a pad's rows stand against LINES lines of FACING, or nil.
+
+As (ROWS . TEXT).  ROWS says which line each row of the pad stands for, there
+being a row for every screen row the run of lines is drawn as over there: a
+line that wraps is drawn as several and is given that many, and so is a line
+something else hangs rows on.  TEXT says, for each line counting from
+FACING-LINE, which row faces the line's own text, past the rows of whatever
+hangs in front of it.
+
+Nil where those lines are drawn nowhere yet, no window of theirs being up to
+measure them in, and a pad then draws one row for each line."
+  (let ((window (and (buffer-live-p facing) (get-buffer-window facing))))
+    (when (and window facing-line (> lines 0))
+      (let ((height (align-buffer--row-height window))
+            (rows nil)
+            (text (make-vector lines 0))
+            (row 0))
+        (dotimes (index lines)
+          (let* ((line (+ facing-line index))
+                 (position (align-buffer-line-position facing line))
+                 (hanging (if position
+                              (max 0 (round (align-buffer--hanging-height
+                                             window position)
+                                            height))
+                            0))
+                 (whole (if position
+                            (max (1+ hanging)
+                                 (round (align-buffer-line-display-height
+                                         window position)
+                                        height))
+                          1)))
+            (aset text index (+ row hanging))
+            (dotimes (_ whole) (push line rows))
+            (setq row (+ row whole))))
+        (cons (vconcat (nreverse rows)) text)))))
+
+(defun align-buffer-pad-facing-line (overlay row)
+  "Return the line of the facing side ROW of OVERLAY's pad stands for."
+  (let ((rows (car (overlay-get overlay 'align-buffer-pad-run)))
+        (first (overlay-get overlay 'align-buffer-pad-facing-line)))
+    (if (and rows (>= row 0) (< row (length rows)))
+        (aref rows row)
+      (and first (+ first row)))))
+
+(defun align-buffer-pad-text-row (overlay line)
+  "Return the row of OVERLAY's pad facing LINE's own text, or nil."
+  (let ((text (cdr (overlay-get overlay 'align-buffer-pad-run)))
+        (first (overlay-get overlay 'align-buffer-pad-facing-line)))
+    (when first
+      (let ((index (- line first)))
+        (cond ((and text (>= index 0) (< index (length text)))
+               (aref text index))
+              ((and (null text) (>= index 0)
+                    (< index (align-buffer-pad-rows overlay)))
+               index))))))
+
 (defun align-buffer-pad-anchor (overlay)
   "Return where the line OVERLAY's rows are drawn in front of begins.
 What the rows are measured from: they are the display of the lines the other
@@ -106,6 +163,10 @@ which is what lets a walk of the pad scroll the facing window alongside."
                (hangs (if (bobp) anchor
                         (save-excursion (forward-line -1)
                                         (line-end-position))))
+               ;; A row for every screen row the run is drawn as over there,
+               ;; and which line each of them stands for.
+               (run (align-buffer--pad-run-rows facing facing-line rows))
+               (rows (if run (length (car run)) rows))
                ;; The colour of the line the rows hang after, read before
                ;; the pad is there to be read instead of it.  A hunk with
                ;; lines on both sides has its own faced already, and the
@@ -117,6 +178,7 @@ which is what lets a walk of the pad scroll the facing window alongside."
           (setq align-buffer--pads t)
           (align-buffer--pads-level-exactly buffer t)
           (overlay-put overlay 'align-buffer-pad-rows rows)
+          (overlay-put overlay 'align-buffer-pad-run run)
           (overlay-put overlay 'align-buffer-pad-facing facing)
           (overlay-put overlay 'align-buffer-pad-facing-line facing-line)
           (overlay-put overlay 'align-buffer-pad-opening opening)
@@ -174,6 +236,22 @@ newline rather than at POSITION itself."
   "Return how many rows OVERLAY's pad has."
   (or (overlay-get overlay 'align-buffer-pad-rows) 0))
 
+(defun align-buffer-pad-row-height (window _overlay _row)
+  "Return how tall a row of a pad is drawn in WINDOW, in pixels.
+One row of the window: a pad draws a row for each line the other side has,
+every one of them the same height."
+  (align-buffer--row-height window))
+
+(defun align-buffer--pad-above (window _overlay row)
+  "Return the pixels of a pad WINDOW draws above its ROWth row.
+The whole pad where ROW is the row after its last, which is what the line the
+rows stand in front of is drawn below."
+  (* row (align-buffer--row-height window)))
+
+(defun align-buffer-pad-height (window overlay)
+  "Return how tall the whole of OVERLAY's pad is drawn, in pixels."
+  (align-buffer--pad-above window overlay (align-buffer-pad-rows overlay)))
+
 (defun align-buffer--pad-show-cursor (overlay row)
   "Ask for the cursor on ROW of OVERLAY's pad, or on none when ROW is nil."
   (let* ((rows (align-buffer-pad-rows overlay))
@@ -225,7 +303,7 @@ the pad between its ends."
                     ((and next (= (align-buffer-pad-hangs next) from))
                      next)))))))
     (if (and pad (>= to (align-buffer-pad-anchor pad)))
-        (* (align-buffer-pad-rows pad) (align-buffer--row-height window))
+        (align-buffer-pad-height window pad)
       0)))
 
 (setq align-buffer-uncounted-height-function #'align-buffer--pad-uncounted)
@@ -254,13 +332,14 @@ rows further off than it is."
 (defun align-buffer--pad-top (window overlay)
   "Return how far below WINDOW's top OVERLAY's first pad row is drawn."
   (- (align-buffer--offset-in window (align-buffer-pad-anchor overlay))
-     (* (align-buffer-pad-rows overlay) (align-buffer--row-height window))))
+     (align-buffer-pad-height window overlay)))
 
 (defun align-buffer--pad-reveal (window overlay row)
   "Scroll WINDOW so that ROW of OVERLAY's pad is clear of its edges."
-  (let* ((height (align-buffer--row-height window))
+  (let* ((height (align-buffer-pad-row-height window overlay row))
          (band (align-buffer--band window))
-         (top (+ (align-buffer--pad-top window overlay) (* row height))))
+         (top (+ (align-buffer--pad-top window overlay)
+                 (align-buffer--pad-above window overlay row))))
     (cond ((< top (car band))
            (align-buffer-scroll window (- top (car band))))
           ((> (+ top height) (cdr band))
@@ -302,12 +381,19 @@ is what a scroll of the reader's asks for."
 The pad stands for lines the facing side has, so walking its rows walks those
 lines, and the two panes go on reading level."
   (let* ((facing (overlay-get overlay 'align-buffer-pad-facing))
-         (first (overlay-get overlay 'align-buffer-pad-facing-line))
+         (line (align-buffer-pad-facing-line overlay row))
          (other (and (buffer-live-p facing) (get-buffer-window facing))))
-    (when (and other first)
-      (let* ((height (align-buffer--row-height window))
-             (wanted (+ (align-buffer--pad-top window overlay) (* row height)))
-             (position (align-buffer-line-position facing (+ first row))))
+    (when (and other line)
+      (let* (;; The rows of the line's own display this row is past: a line
+             ;; drawn as several rows is faced by several, and the one being
+             ;; read is that far down the line rather than at its text.
+             (within (* (- row (or (align-buffer-pad-text-row overlay line)
+                                   row))
+                        (align-buffer--row-height window)))
+             (wanted (- (+ (align-buffer--pad-top window overlay)
+                           (align-buffer--pad-above window overlay row))
+                        within))
+             (position (align-buffer-line-position facing line)))
         ;; Scrolled by what it is out by, again and again until it is out by
         ;; nothing: one measurement across a long stretch of a buffer can be
         ;; wide of the mark, and a pass that lands on the wrong row leaves the
@@ -669,7 +755,6 @@ position and the rows holding none."
     (save-restriction
       (widen)
       (let* ((start (window-start window))
-             (height (align-buffer--row-height window))
              (nearby (delq nil
                            (list (align-buffer-pad-at start)
                                  (when-let ((next (align-buffer--line-after
@@ -678,33 +763,45 @@ position and the rows holding none."
         (seq-find (lambda (pad)
                     (let ((top (align-buffer--pad-top window pad)))
                       (and (<= top 0)
-                           (> (+ top (* (align-buffer-pad-rows pad) height))
+                           (> (+ top (align-buffer-pad-height window pad))
                               0))))
                   nearby)))))
 
-(defun align-buffer--facing-pad (session side line)
+(defun align-buffer--facing-pad (session side line &optional window)
   "Return the pad standing for LINE on the side facing SIDE, as (PAD . ROW).
 
 Nil unless LINE is one of a run the other side has not got.  The pads make
 the correspondence whole: a run of lines one side alone has is drawn over
-there as the rows of a pad, one row for each of those lines, so a reader on
-the real lines has a row to be level with all the way down the run.  The pad
-hangs on the line after the run's own pair, which is how it is found."
+there as the rows of a pad, a row for every screen row the run is drawn as,
+so a reader on the real lines has a row to be level with all the way down the
+run.  The pad hangs on the line after the run's own pair, which is how it is
+found.
+
+Given WINDOW, the row is the one standing for the screen row the reader is on
+rather than for the beginning of their line: a line of theirs that wraps is
+read a row at a time and each of those rows has a row of the pad of its own."
   (let ((anchor (align-buffer-anchor session side line)))
     (when (and anchor (> line (car anchor)))
       (let* ((facing (align-buffer-buffer session
                                           (align-buffer-other-side side)))
              (position (align-buffer-line-position facing (1+ (cdr anchor))))
              (pad (and position (align-buffer-pad-at position facing)))
-             (row (- line (car anchor) 1)))
-        (when (and pad
+             ;; The row facing LINE's own text, and on from there by the
+             ;; rows of their own line the reader has already walked.
+             (text (and pad (align-buffer-pad-text-row pad line)))
+             (into (if (and text window)
+                       (max 0 (round (- (align-buffer--point-row-top window)
+                                        (align-buffer--offset-in
+                                         window
+                                         (align-buffer-line-position
+                                          (window-buffer window) line)))
+                                     (align-buffer--row-height window)))
+                     0))
+             (row (and text (+ text into))))
+        (when (and pad row
                    (< row (align-buffer-pad-rows pad))
                    (eq (overlay-get pad 'align-buffer-pad-facing)
-                       (align-buffer-buffer session side))
-                   (equal (+ (or (overlay-get pad 'align-buffer-pad-facing-line)
-                                 0)
-                             row)
-                          line))
+                       (align-buffer-buffer session side)))
           (cons pad row))))))
 
 (defun align-buffer--face-facing-row (window pad row)
@@ -717,10 +814,10 @@ a window being scrolled by redisplay to show its own point."
   (let ((other (and (overlay-buffer pad)
                     (get-buffer-window (overlay-buffer pad)))))
     (when (window-live-p other)
-      (let* ((height (align-buffer--row-height other))
-             (wanted (align-buffer--point-row-top window))
+      (let* ((wanted (align-buffer--point-row-top window))
              (drawn (lambda ()
-                      (+ (align-buffer--pad-top other pad) (* row height))))
+                      (+ (align-buffer--pad-top other pad)
+                         (align-buffer--pad-above other pad row))))
              (tries 0)
              (out (- (funcall drawn) wanted)))
         (while (and (not (zerop out)) (< tries 4))
@@ -772,7 +869,19 @@ it and leaves redisplay nothing to correct."
   ;; redisplay scrolls a window with nothing held back.
   (unless (align-buffer--pad-inside-p window)
     (align-buffer-forget-vscroll window))
-  (when (align-buffer--pad-inside-p window)
+  ;; Nothing to do at all while a row of a pad is being read: the cursor is
+  ;; then drawn on the row and point waits on the line the rows hang after,
+  ;; which the view is free to leave above its top.  Pulling the view back to
+  ;; point there takes away the very scroll that brought the row into sight,
+  ;; and the row then reads as one the reader has moved away from, so the
+  ;; walk is given up and the press is spent on nothing.  This is the pull
+  ;; `align-buffer-hold-margin' holds off redisplay for, and it is ours.
+  ;;
+  ;; The walk's own end asks for the pull instead, there being point to show
+  ;; again from there on.
+  (when (and (align-buffer--pad-inside-p window)
+             (not (buffer-local-value 'align-buffer--walked
+                                      (window-buffer window))))
     (let* ((height (align-buffer--row-height window))
            (band (align-buffer--band window))
            (top (align-buffer--point-row-top window)))
@@ -784,11 +893,18 @@ it and leaves redisplay nothing to correct."
 (defun align-buffer--pad-row-at (window overlay pixels)
   "Return the row of OVERLAY's pad WINDOW draws PIXELS below its top.
 The nearest row where the pad has none there, so a caller measuring against
-an edge of the window always has a row to hold on to."
-  (let ((height (align-buffer--row-height window)))
-    (max 0 (min (1- (align-buffer-pad-rows overlay))
-                (floor (- pixels (align-buffer--pad-top window overlay))
-                       height)))))
+an edge of the window always has a row to hold on to.
+
+Walked down the rows rather than divided by one height, the rows standing for
+lines of the facing side and being as tall as those lines are drawn."
+  (let* ((rows (align-buffer-pad-rows overlay))
+         (want (- pixels (align-buffer--pad-top window overlay)))
+         (row 0)
+         (below (align-buffer-pad-row-height window overlay 0)))
+    (while (and (< row (1- rows)) (>= want below))
+      (setq row (1+ row))
+      (setq below (+ below (align-buffer-pad-row-height window overlay row))))
+    (max 0 (min (1- rows) row))))
 
 (defun align-buffer--pad-row-in-band (window overlay row)
   "Return ROW of OVERLAY's pad, held inside the rows WINDOW shows clear.
@@ -798,19 +914,28 @@ What keeps a scroll honest: the row being read stays where it is on screen
 while the view moves under it, and moves only when the view has scrolled past
 it.  Clear of the margins as well, since a row against an edge is one the
 facing pane cannot be brought level with, its own margin being in the way."
-  (let* ((height (align-buffer--row-height window))
-         (band (align-buffer--band window))
+  (let* ((band (align-buffer--band window))
          (top (align-buffer--pad-top window overlay))
-         (low (max 0 (ceiling (- (car band) top) height)))
-         (high (min (1- (align-buffer-pad-rows overlay))
-                    (floor (- (cdr band) top height) height))))
-    (and (<= low high) (min high (max low row)))))
+         (rows (align-buffer-pad-rows overlay))
+         (low nil)
+         (high nil))
+    ;; Walked, since a row is only as tall as the line it stands for: the
+    ;; first row drawn wholly below the top margin, and the last drawn wholly
+    ;; above the bottom one.
+    (dotimes (index rows)
+      (let* ((above (+ top (align-buffer--pad-above window overlay index)))
+             (below (+ above (align-buffer-pad-row-height window overlay
+                                                           index))))
+        (when (and (null low) (>= above (car band))) (setq low index))
+        (when (<= below (cdr band)) (setq high index))))
+    (and low high (<= low high) (min high (max low row)))))
 
 (defun align-buffer--pad-row-shown-p (window overlay row)
   "Return non-nil when ROW of OVERLAY's pad is drawn inside WINDOW."
   (and (>= (align-buffer-pad-hangs overlay) (window-start window))
-       (let* ((height (align-buffer--row-height window))
-              (top (+ (align-buffer--pad-top window overlay) (* row height))))
+       (let* ((height (align-buffer-pad-row-height window overlay row))
+              (top (+ (align-buffer--pad-top window overlay)
+                      (align-buffer--pad-above window overlay row))))
          (and (>= top 0)
               (<= (+ top height) (window-body-height window t))))))
 
@@ -1012,6 +1137,7 @@ through that to last longer than a single press."
     ;; and a reader stepping off the rows onto the line they hang on changes
     ;; neither the view nor the line it reads.
     (align-buffer--walk-away)
+    (align-buffer--keep-point-in-band window)
     (align-buffer-sync window))
    ;; A row off the screen is one redisplay scrolls back to, so a walk lasts
    ;; as long as its row is drawn; the facing pane is brought level with the
@@ -1023,6 +1149,7 @@ through that to last longer than a single press."
    (t
     (align-buffer--walk-away)
     (align-buffer--keep-point-shown window)
+    (align-buffer--keep-point-in-band window)
     (align-buffer-sync window)))
   ;; A walked row carries the cursor itself.  Anything else leaves point where
   ;; the pairs cannot speak for it, and two things are then ours: a line
@@ -1099,6 +1226,43 @@ worse."
   (unless scrolled (align-buffer--keep-point-in-band window))
   (align-buffer--face-run window))
 
+(defvar align-buffer--face-timer nil
+  "The one-shot timer set to face a run again after redisplay moved the view.")
+
+(defvar align-buffer--facing-again nil
+  "Non-nil while the pass that faces a run after such a scroll is running.")
+
+(defun align-buffer--face-after-scroll (window)
+  "Face WINDOW's run again once the scroll redisplay is making is through.
+
+The one thing the hook that places cannot see: a command that writes a view of
+its own - a recentre among them - is not finished with the view by the time
+that hook runs, and a run faced then stands beside a line the reader is about
+to leave.  Redisplay moving the view is what says so, and this is called from
+there, so the facing itself waits for a timer.
+
+Where a pad's rows are being read it is the row that is faced again, the
+reader standing on it rather than on a line of their own."
+  (when (and (window-live-p window)
+             (not align-buffer--face-timer)
+             (not align-buffer--facing-again))
+    (setq align-buffer--face-timer
+          (run-with-timer
+           0 nil
+           (lambda ()
+             (setq align-buffer--face-timer nil)
+             (when (window-live-p window)
+               (with-demoted-errors "align-buffer facing after a scroll: %S"
+                 (with-current-buffer (window-buffer window)
+                   (let ((align-buffer--facing-again t)
+                         (walked align-buffer--walked))
+                     (if walked
+                         (align-buffer--pad-face-row window (car walked)
+                                                     (cdr walked))
+                       (align-buffer--face-run window)))))))))))
+
+(setq align-buffer-held-scroll-function #'align-buffer--face-after-scroll)
+
 (defun align-buffer--read-view-when-settled (window scrolled &optional tries)
   "Read WINDOW's view once the redisplay about to move it has been through.
 
@@ -1145,7 +1309,8 @@ pad that stands for them, and they are ours to keep level."
          (line (and session side
                     (align-buffer-line-at (current-buffer)
                                           (window-point window))))
-         (facing (and line (align-buffer--facing-pad session side line))))
+         (facing (and line (align-buffer--facing-pad session side line
+                                                    window))))
     (cond
      (facing
       ;; Both panes are ours while the run lasts, for the same reason they are

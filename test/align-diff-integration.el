@@ -190,13 +190,14 @@ Nil when no pad is being walked, which is a different answer from zero."
     (when walked
       (pcase-let* ((`(,overlay . ,row) walked)
                    (facing (overlay-get overlay 'align-buffer-pad-facing))
-                   (first (overlay-get overlay 'align-buffer-pad-facing-line))
+                   (line (align-buffer-pad-facing-line overlay row))
                    (other (get-buffer-window facing))
                    (wanted (+ (align-buffer--pad-top window overlay)
-                              (* row (align-buffer--row-height window))))
-                   (drawn (align-buffer--offset-in
-                           other (align-buffer-line-position facing
-                                                             (+ first row)))))
+                              (align-buffer--pad-above window overlay row)))
+                   (drawn (+ (align-buffer--offset-in
+                              other (align-buffer-line-position facing line))
+                             (* (- row (align-buffer-pad-text-row overlay line))
+                                (align-buffer--row-height other)))))
         (- drawn wanted)))))
 
 (defun align-diff-integration--pair-out-by (session side)
@@ -695,17 +696,57 @@ buffer's own rule for leaving the panes alone."
       (align-diff-integration--settle)
       session)))
 
-(defun align-diff-integration--stop (session side)
+(defvar align-diff-integration--uncentrable 0
+  "How many stops were allowed for being too near the beginning of a buffer.")
+
+(defun align-diff-integration--off-centre (session side section)
+  "Return how far from centred SECTION is drawn in SESSION's SIDE.
+What is centred is the section as that pane shows it: its own lines where it
+has them, and the rows of the pad standing for them where it has none.
+Measured against `align-buffer--centre-pixels', which is the promise, with
+`posn-at-point' for where a line is actually drawn."
+  (let* ((buffer (align-buffer-buffer session side))
+         (window (get-buffer-window buffer))
+         (walked (buffer-local-value 'align-buffer--walked buffer)))
+    (if walked
+        (let ((block (align-buffer-pad-height window (car walked))))
+          (- (align-buffer--pad-top window (car walked))
+             (align-buffer--centre-pixels-of window block)))
+      (let* ((line (align-buffer-section-line section side))
+             (position (align-buffer-line-position buffer line))
+             (drawn (with-selected-window window
+                      (when (>= position (window-start window))
+                        (cdr (posn-x-y (posn-at-point position window))))))
+             (wanted (align-buffer--centre-pixels
+                      window (align-buffer-section-count section side))))
+        (when drawn
+          ;; A section too near the beginning of the buffer to be brought that
+          ;; far down is as centred as it can be: the window has nothing above
+          ;; it left to scroll into, which is the rule the fuzzer holds a
+          ;; centring to as well.  Counted, so a scenario can say whether its
+          ;; own stops were held to the centre itself or to this.
+          (if (and (< drawn wanted)
+                   (with-current-buffer buffer
+                     (= (window-start window) (point-min))))
+              (progn (cl-incf align-diff-integration--uncentrable) 0)
+            (- drawn wanted)))))))
+
+(defun align-diff-integration--stop (session side &optional section)
   "Return where the reader stands in SESSION's SIDE and how level it reads.
 A row of a pad where one is being read, and a line of the text otherwise, with
-how far out of level that row or that line's pair is drawn."
+how far out of level that row or that line's pair is drawn.  Given SECTION,
+how far from centred that section is drawn as well."
   (let ((walked (align-diff-integration--walked session side)))
-    (if walked
-        (list :row walked
-              :out-by (align-diff-integration--out-by session side))
-      (list :line (align-buffer-line-at (align-buffer-buffer session side)
-                                        (point))
-            :out-by (align-diff-integration--pair-out-by session side)))))
+    (append
+     (if walked
+         (list :row walked
+               :out-by (align-diff-integration--out-by session side))
+       (list :line (align-buffer-line-at (align-buffer-buffer session side)
+                                         (point))
+             :out-by (align-diff-integration--pair-out-by session side)))
+     (when section
+       (list :off-centre (align-diff-integration--off-centre session side
+                                                             section))))))
 
 (defun align-diff-integration--stop-name (stop)
   "Return what STOP stands at: a line of the text, or a row of a pad."
@@ -715,13 +756,24 @@ how far out of level that row or that line's pair is drawn."
   "Press KEYS in SESSION's SIDE until the move is refused, and return the stops.
 A move with nowhere left to go signals, which is how the end is found.  MOST
 stops the walk where no refusal comes, and defaults to eight."
+  ;; Quiet first, and quiet throughout: a message takes a row from every
+  ;; window on the frame while it is up, so a centre worked out with one up is
+  ;; a row from the one measured after it has gone.
+  (message nil)
+  (redisplay t)
   (align-diff-integration--stand session side 1)
-  (let ((stops nil)
+  (let ((sections (align-buffer-session-sections session))
+        (stops nil)
         (more t))
     (while (and more (< (length stops) (or most 8)))
       (condition-case nil
-          (progn (align-diff-integration--keys keys)
-                 (push (align-diff-integration--stop session side) stops))
+          (let ((inhibit-message t))
+            (align-diff-integration--keys keys)
+            ;; Walked from the first line, so the stops come in the order
+            ;; the sections are in, and each one is read against its own.
+            (push (align-diff-integration--stop
+                   session side (nth (length stops) sections))
+                  stops))
         (user-error (setq more nil))))
     (nreverse stops)))
 
@@ -756,6 +808,11 @@ stops the walk where no refusal comes, and defaults to eight."
      (seq-filter (lambda (stop)
                    (let ((out (plist-get stop :out-by)))
                      (and out (not (zerop out)))))
+                 stops))
+    (align-diff-integration--expect
+     "stops not drawn centred" nil
+     (seq-filter (lambda (stop)
+                   (not (equal 0 (plist-get stop :off-centre))))
                  stops))
     (align-diff-integration--quit session)))
 
@@ -870,6 +927,17 @@ whose two versions wrap to a different number of rows."
                        (let ((out (plist-get stop :out-by)))
                          (and out (not (zerop out)))))
                      stops))
+        (align-diff-integration--expect
+         (format "stops not drawn centred from the %s" side) nil
+         (seq-filter (lambda (stop)
+                       (not (equal 0 (plist-get stop :off-centre))))
+                     stops))
+        ;; A section the buffer cannot bring down to the centre is allowed
+        ;; for, and there is at most one such section in a run: the first,
+        ;; which has only the lines above it to be pushed down by.
+        (align-diff-integration--expect
+         (format "stops allowed rather than centred from the %s" side) t
+         (<= align-diff-integration--uncentrable 2))
         ;; And back to the top from the last hunk, which is the longest jump
         ;; the session has in it.
         (align-diff-integration--keys "M-<")

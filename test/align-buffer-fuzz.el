@@ -169,8 +169,15 @@ in length on purpose."
                       (if (eq side 'right) (align-buffer-fuzz--long 25) "")))
       ('shrunk (format "\tshrunk(%d);%s" id
                        (if (eq side 'left) (align-buffer-fuzz--long 25) "")))
-      ('added (format "\tadded(%d);" id))
-      ('removed (format "\tremoved(%d);" id))
+      ;; Every third line of a run the other side has not got is long enough
+      ;; to wrap where the buffer wraps.  A pad stands one row against each of
+      ;; these lines, so a line taking two rows over here is a row the pad has
+      ;; to be as tall as, and everything below the run is out by one for each
+      ;; such line where it is not.
+      ('added (format "\tadded(%d);%s" id
+                      (if (zerop (% id 3)) (align-buffer-fuzz--long 20) "")))
+      ('removed (format "\tremoved(%d);%s" id
+                        (if (zerop (% id 3)) (align-buffer-fuzz--long 20) "")))
       ('moved (format "\tmoved(%d);" id))
       ('tall (format "\ttall(%d);" id))
       ('promoted (format "\tpromoted(%d);" id))
@@ -494,21 +501,30 @@ the word of what it is checking."
          (pad (cond ((and here (= (align-buffer-pad-hangs here) start)) here)
                     ((and next (= (align-buffer-pad-hangs next) start)) next))))
     (if (and pad (>= position (align-buffer-pad-anchor pad)))
-        (* (align-buffer-pad-rows pad) (align-buffer--row-height window))
+        (align-buffer-pad-height window pad)
       0)))
 
 (defun align-buffer-fuzz--text-drawn (window line)
   "Return where WINDOW draws the text of LINE, in pixels below its top.
 
-Past whatever hangs in front of that text.  A note hangs at the line's own
-beginning and is drawn above it, so the span to that beginning stops at the
-note's first row; what has to be level with a row standing for a line is the
-row the line's own text is drawn on, which is where its cursor would go."
-  (let ((drawn (align-buffer-fuzz--drawn window line)))
-    (when drawn
-      (+ drawn (align-buffer--hanging-height
-                window (align-buffer-line-position (window-buffer window)
-                                                   line))))))
+The span to the line already reaches past whatever hangs in front of its text:
+measured against `posn-at-point', a line with a note of three rows on it reads
+as the row its own text is on and not as the note's first row.  What a row
+standing for a line has to be level with is that text row, so nothing is added
+here."
+  (align-buffer-fuzz--drawn window line))
+
+(defun align-buffer-fuzz--row-drawn (window pad row)
+  "Return where WINDOW draws the facing row ROW of PAD stands for.
+
+A pad has a row for every screen row the run is drawn as, so the row to be
+level with is that far down the line's own display: the line's text, and then
+the rows of it the reader has already gone past."
+  (let* ((line (align-buffer-pad-facing-line pad row))
+         (text (and line (align-buffer-pad-text-row pad line)))
+         (drawn (and line (align-buffer-fuzz--text-drawn window line))))
+    (when (and drawn text)
+      (+ drawn (* (- row text) (align-buffer--row-height window))))))
 
 (defun align-buffer-fuzz--pad-reading (session leader side)
   "Return what SESSION promises to keep level besides a pair, or nil.
@@ -524,36 +540,52 @@ is standing in: reading the rows, or reading the lines they stand for."
     (when (window-live-p follower)
       (if walked
           (pcase-let* ((`(,pad . ,row) walked)
-                       (first (overlay-get pad 'align-buffer-pad-facing-line)))
-            (when (and first (eq (overlay-get pad 'align-buffer-pad-facing)
-                                 (window-buffer follower)))
-              (list (format "row %s of the pad against line %s"
-                            row (+ first row))
-                    (+ (align-buffer--pad-top leader pad)
-                       (* row (align-buffer--row-height leader)))
-                    (align-buffer-fuzz--text-drawn follower (+ first row)))))
+                       (line (align-buffer-pad-facing-line pad row)))
+            (when (and line (eq (overlay-get pad 'align-buffer-pad-facing)
+                                (window-buffer follower)))
+              (let ((own (+ (align-buffer--pad-top leader pad)
+                            (align-buffer--pad-above leader pad row))))
+                (list (format "row %s of the pad against line %s" row line)
+                      own
+                      (align-buffer-fuzz--row-drawn follower pad row)
+                      ;; How near any start of the follower's own could draw
+                      ;; that line, which is all it can be held to: a line too
+                      ;; near the beginning of its buffer to be drawn that far
+                      ;; down is one no view of its own reaches.
+                      (align-buffer-fuzz--best-achievable follower line
+                                                          own)))))
         (let* ((line (align-buffer-line-at buffer (window-point leader)))
-               (facing (and line (align-buffer--facing-pad session side line))))
+               (facing (and line (align-buffer--facing-pad session side line
+                                                           leader))))
           (when facing
             (pcase-let ((`(,pad . ,row) facing))
-              (list (format "line %s against row %s of the pad standing for it"
+              ;; The reader's own screen row, which is what the row stands
+              ;; against: a line of theirs that wraps is read a row at a time
+              ;; and the pad has a row for each of them.
+              (list (format "row %s of line %s against row %s of the pad"
+                            (- row (align-buffer-pad-text-row pad line))
                             line row)
-                    (align-buffer-fuzz--text-drawn leader line)
+                    (align-buffer--point-row-top leader)
                     (+ (align-buffer--pad-top follower pad)
-                       (* row (align-buffer--row-height follower)))))))))))
+                       (align-buffer--pad-above follower pad row))
+                    0))))))))
 
 (defun align-buffer-fuzz--pad-faults (reading)
   "Return the fault READING shows, as a list, or nil where it keeps its promise.
 Nothing is promised where the leader does not draw its own side of it: a row
 or a line above the top of its window is one no follower can be level with."
   (when reading
-    (pcase-let ((`(,what ,own ,other) reading))
-      (when (and own other (>= own 0) (/= own other))
+    (pcase-let ((`(,what ,own ,other ,best) reading))
+      (when (and own other (>= own 0)
+                 ;; Held no closer than any start of the follower's own could
+                 ;; draw it, which is the rule a pair is held to as well.
+                 (> (abs (- other own)) (or best 0)))
         (list (cons 'pad-level
                     (format (concat "%s: the leader draws its own at %s px, "
                                     "the follower the other at %s px, %s px "
-                                    "apart")
-                            what own other (- other own))))))))
+                                    "apart, where a start of its own comes "
+                                    "within %s px")
+                            what own other (- other own) (or best 0))))))))
 
 (defun align-buffer-fuzz--above (window line)
   "Return the height of WINDOW's text above LINE, in pixels."
@@ -695,6 +727,57 @@ pane still on its way."
     (length seen)))
 
 
+;;; What a move to a section promises, checked against what is drawn
+
+(defun align-buffer-fuzz--section-ahead (session forward)
+  "Return the section a move FORWARD or back would go to in SESSION.
+Found the way the command finds it, and found before the move: a session keeps
+no note of which section it last used, and two sections of a random diff can
+begin at the same line, one of them with no lines on this side at all."
+  (let ((side (align-buffer-side))
+        (sections (align-buffer-session-sections session)))
+    (and side sections
+         (align-buffer--section-toward
+          (align-buffer--reader-place sections side) sections side forward))))
+
+(defun align-buffer-fuzz--centring-faults (section)
+  "Return the fault where SECTION, just moved to, is not drawn centred.
+What is centred is the section as the leading pane shows it: its own lines
+where it has them, and the rows of the pad standing for them where it has
+none.  Two things are promised short of the centre: a section too near the
+beginning of the buffer to be brought that far down, and one whose first line
+has more hanging in front of it than the centre is deep, which leaves the
+window held against what hangs."
+  (let* ((window (selected-window))
+         (buffer (window-buffer window))
+         (side (buffer-local-value 'align-buffer--side buffer)))
+    (when (and section side)
+      (let* ((walked (buffer-local-value 'align-buffer--walked buffer))
+             (rows (if walked (align-buffer-pad-rows (car walked))
+                     (align-buffer-section-count section side)))
+             (centre (if walked
+                         (align-buffer--centre-pixels-of
+                          window (align-buffer-pad-height window
+                                                          (car walked)))
+                       (align-buffer--centre-pixels window rows)))
+             (hanging (if walked 0
+                        (align-buffer--hanging-height
+                         window (align-buffer--section-position
+                                 buffer (align-buffer-section-line section
+                                                                   side)))))
+             (wanted (max centre hanging))
+             (drawn (if walked (align-buffer--pad-top window (car walked))
+                      (align-buffer-fuzz--text-drawn
+                       window (align-buffer-section-line section side))))
+             (at-top (with-current-buffer buffer
+                       (= (window-start window) (point-min)))))
+        (when (and drawn (/= drawn wanted) (not (and at-top (< drawn wanted))))
+          (list (cons 'off-centre
+                      (format (concat "the move left a section of %s row(s) "
+                                      "drawn at %s, centred being %s")
+                              rows drawn wanted))))))))
+
+
 ;;; What the sync promises, checked against what is drawn
 
 (defun align-buffer-fuzz--check (session &optional swapped)
@@ -717,7 +800,9 @@ brings it back."
                                          (window-point leader)))
              ;; Inside a run of lines the other side has not got, the rows
              ;; standing for them are what is level and the pairs say nothing,
-             ;; so that promise is checked in place of this one.
+             ;; so that promise is checked in place of this one - and where
+             ;; the rows cannot be level with those lines at all, neither
+             ;; promise holds and the reading says so.
              (anchor (and line (null reading)
                           (align-buffer-anchor session side line))))
         (when reading (cl-incf align-buffer-fuzz--padded))
@@ -839,6 +924,16 @@ brings it back."
                                       row lowest highest point-row at
                                       (cdr anchor)))
                         faults))
+                 ;; Point on the first line the band allows, which is not
+                 ;; always the line the row arithmetic names: the rows are
+                 ;; divided by one height while the lines are drawn at the
+                 ;; heights they have, so the row asked for can fall between
+                 ;; two of them and the one below it is as near the pair as
+                 ;; point can come.
+                 ((let ((line (align-buffer--line-below follower
+                                                        (* wanted height))))
+                    (and line (= line (window-point follower))))
+                  nil)
                  (t
                   (push (cons 'clamp
                               (format (concat "the pair is drawn on row %s, "
@@ -965,10 +1060,16 @@ a jump to a line and a recenter - ask for the placement themselves."
 
 (defun align-buffer-fuzz--step (session seed number)
   "Take step NUMBER of SEED's walk over SESSION and return what it found."
-  (let ((move (align-buffer-fuzz--pick align-buffer-fuzz--moves))
-        (was (selected-window))
-        (label nil)
-        (faults nil))
+  (let* ((move (align-buffer-fuzz--pick align-buffer-fuzz--moves))
+         (was (selected-window))
+         (label nil)
+         (refused nil)
+         (faults nil)
+         ;; Before the move, which is the only time the section it will use
+         ;; can be told apart from another one beginning at the same line.
+         (going (and (memq move '(section-down section-up))
+                     (align-buffer-fuzz--section-ahead
+                      session (eq move 'section-down)))))
     (condition-case error
         (setq label (align-buffer-fuzz--move move))
       ;; An arrow at the last line signals, which is Emacs and not the sync.
@@ -977,6 +1078,7 @@ a jump to a line and a recenter - ask for the placement themselves."
       ;; And a move with nowhere to go says so, which is the command keeping
       ;; its own promise rather than a fault of the sync's.
       (user-error
+       (setq refused t)
        (setq label (format "%s, refused: %s" move
                            (error-message-string error))))
       (error
@@ -988,6 +1090,12 @@ a jump to a line and a recenter - ask for the placement themselves."
             session (buffer-local-value 'align-buffer--side
                                         (window-buffer (selected-window)))))
           align-buffer-fuzz--jumpy)
+    ;; A move to a section promises where the section is drawn as well as what
+    ;; is level with it, and that promise is this move's alone: the step after
+    ;; it is free to leave the section anywhere.
+    (when (and going (not refused))
+      (setq faults (append faults
+                           (align-buffer-fuzz--centring-faults going))))
     (let ((swapped (not (eq was (selected-window)))))
       (setq faults (append faults (align-buffer-fuzz--check session swapped)))
       (when align-buffer-fuzz-ask-again

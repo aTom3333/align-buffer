@@ -141,14 +141,30 @@ what stands for it there hangs at the end of the text."
       (with-current-buffer buffer
         (save-restriction (widen) (point-max))))))
 
-(defun align-buffer--centre-pixels (window rows)
-  "Return how far below WINDOW's top a run of ROWS rows reads centred.
+(defun align-buffer--centre-pixels-of (window pixels)
+  "Return how far below WINDOW's top a block PIXELS tall reads centred.
 The scroll margin at least, so that what is centred is not left where
-redisplay would scroll it away, and the top of the window for a run taller
-than the window is."
-  (* (max (align-buffer-effective-margin window)
-          (/ (- (window-body-height window) rows) 2))
-     (align-buffer--row-height window)))
+redisplay would scroll it away, and the top of the window for a block taller
+than the window is.  On a row boundary, which is as near the middle as a
+window can be scrolled."
+  (let ((height (align-buffer--row-height window)))
+    (* (max (align-buffer-effective-margin window)
+            (/ (max 0 (- (window-body-height window t) pixels)) (* 2 height)))
+       height)))
+
+(defun align-buffer--centre-pixels (window rows)
+  "Return how far below WINDOW's top a run of ROWS rows reads centred."
+  (align-buffer--centre-pixels-of
+   window (* rows (align-buffer--row-height window))))
+
+(defun align-buffer--centre-target (window position rows)
+  "Return where POSITION is levelled to for ROWS rows of it to read centred.
+What hangs in front of POSITION is drawn above its own text, so the levelling
+aims that much higher and the text lands on the centre.  Not above the
+window's top, where what hangs is taller than the centre and the window is
+held against it instead."
+  (max 0 (- (align-buffer--centre-pixels window rows)
+            (align-buffer--hanging-height window position))))
 
 (defun align-buffer--centre-at (window position pixels)
   "Scroll WINDOW so that POSITION is drawn PIXELS below its top.
@@ -185,18 +201,14 @@ line below the boundary as they would with no pad there at all."
         (goto-char (align-buffer-pad-hangs pad))
         (when (window-live-p window)
           (set-window-point window (point))
-          ;; What is drawn above the line the rows stand in front of: the rows
-          ;; themselves, and the row of the line they hang after, which
-          ;; carries them - except at the beginning of the buffer, where there
-          ;; is no line before them and they are all there is.
-          (let* ((above (+ (align-buffer-pad-rows pad)
-                           (if (= (align-buffer-pad-hangs pad)
-                                  (align-buffer-pad-anchor pad))
-                               0 1)))
-                 (wanted (align-buffer--centre-pixels window above)))
+          ;; The rows are the section as this pane shows it, so they are what
+          ;; is centred.  Levelling is asked of the pad's anchor, the rows
+          ;; holding no position to ask it of, and that anchor is drawn the
+          ;; whole block of rows below where the block begins.
+          (let ((block (align-buffer-pad-height window pad)))
             (align-buffer--centre-at
              window (align-buffer-pad-anchor pad)
-             (+ wanted (* above (align-buffer--row-height window))))))
+             (+ (align-buffer--centre-pixels-of window block) block))))
         (align-buffer--walk-into pad 0 window t))
        (t
         (goto-char position)
@@ -204,8 +216,9 @@ line below the boundary as they would with no pad there at all."
           (set-window-point window (point))
           (align-buffer--centre-at
            window position
-           (align-buffer--centre-pixels
-            window (align-buffer-section-count section side)))))))))
+           (align-buffer--centre-target
+            window position
+            (align-buffer-section-count section side)))))))))
 
 
 ;;; Running out of sections

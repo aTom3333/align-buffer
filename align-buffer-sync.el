@@ -100,6 +100,13 @@ buffer, so whatever is drawn from its point is brought up to date from here.")
 (defvar align-buffer-inhibit-sync nil
   "When non-nil, no placement is made and the windows are left alone.")
 
+(defvar align-buffer-held-scroll-function nil
+  "A function called with a window redisplay has scrolled, or nil.
+Called in place of a placement while `align-buffer-inhibit-sync' says a
+consumer is holding both panes, and only for a scroll that is not ours: it is
+how such a consumer hears that redisplay has moved a view out from under what
+it placed.  Called from inside redisplay, so what it does about it waits.")
+
 (defvar align-buffer-point-for-scroll-function nil
   "A function saying where point belongs after a scroll, given a window.
 Where it answers a position, point is put there: a consumer drawing the cursor
@@ -192,6 +199,14 @@ a timer of no delay can run before that redisplay rather than after.")
   (with-current-buffer (window-buffer window)
     (max 1 (default-line-height))))
 
+(defun align-buffer--window-rows (window)
+  "Return how many rows of WINDOW's own buffer its body holds.
+Counted with the height those rows are drawn at rather than with
+`window-body-height', which divides by the frame's default: a buffer whose
+rows are taller than that - `line-spacing', a taller default face - draws
+fewer rows than the window reports."
+  (max 1 (/ (window-body-height window t) (align-buffer--row-height window))))
+
 (defun align-buffer--pixels-between (window from to)
   "Return the height in pixels of WINDOW's text from FROM to TO."
   ;; `window-text-pixel-size' takes the window's vscroll off whatever it
@@ -208,6 +223,7 @@ a timer of no delay can run before that redisplay rather than after.")
   (or (and align-buffer-uncounted-height-function
            (funcall align-buffer-uncounted-height-function window from to))
       0))
+
 
 (defun align-buffer--hanging-height (window position)
   "Return the height of what hangs at POSITION above the text there.
@@ -313,13 +329,10 @@ less the margin, and a line left in that band is one redisplay scrolls the
 window to get out of."
   (let* ((height (align-buffer--row-height window))
          (margin (align-buffer-effective-margin window))
-         ;; Counted with the height the band is measured in, not with
-         ;; `window-body-height', which divides by the frame's own default: a
-         ;; buffer whose rows are taller than that - `line-spacing', a taller
-         ;; default face - draws fewer rows than the window reports, and a
-         ;; band built on the reported number reaches past the rows the margin
-         ;; protects, leaving a line deep inside it called clear.
-         (rows (max 1 (/ (window-body-height window t) height))))
+         ;; A band built on the number the window reports reaches past the
+         ;; rows the margin protects, leaving a line deep inside it called
+         ;; clear.
+         (rows (align-buffer--window-rows window)))
     (cons (* margin height)
           (* (max 1 (- rows margin)) height))))
 
@@ -631,6 +644,22 @@ we are willing to lay out rows nobody is going to see."
           (when (and (>= span pixels) (<= (- span pixels) bound))
             (cons start (- span pixels))))))))
 
+(defun align-buffer--already-level-p (window position pixels point)
+  "Return non-nil when WINDOW already draws POSITION PIXELS below its top.
+POINT has to be where the placement would put it as well: a pane that is level
+but reads from the wrong place still has to be put right.
+
+More than one view can draw the pair on the same pixel, and a start walked to
+from one of them names another: writing it every time leaves the pane placed
+to one and then the other by turns, which a reader sees as a pane that will
+not settle."
+  (let ((start (window-start window)))
+    (and (= (window-point window) point)
+         (>= position start)
+         (= (+ (align-buffer--pixels-between window start position)
+               (align-buffer--uncounted-height window start position))
+            pixels))))
+
 (defun align-buffer--start-for-pixels (window position pixels)
   "Return a start for WINDOW putting POSITION PIXELS below its top, and what
 is left over for a vscroll to take off, as (START . VSCROLL).
@@ -864,6 +893,35 @@ often rows an overlay added, and a walk cannot see those at all."
     (car (align-buffer--position-rows-below window counterpart
                                             (- point-row row)))))
 
+(defun align-buffer--pixels-above (window position)
+  "Return how far down WINDOW can draw POSITION at all, in pixels.
+
+What its own buffer draws above it, where that is less than the window: no
+start reaches back past the beginning of a buffer, so a position with little
+above it cannot be put further down than that little.  The window's height
+where there is more above than that, nothing then holding it back.
+
+Measured from a windowful back rather than from the beginning, a span over a
+whole buffer being too dear to take for every placement."
+  (let* ((body (window-body-height window t))
+         (buffer (window-buffer window))
+         (back (with-current-buffer buffer
+                 (save-restriction
+                   (widen)
+                   (car (align-buffer--position-rows-below
+                         window position
+                         (- (1+ (align-buffer--window-rows window)))))))))
+    (if (and back (> back (with-current-buffer buffer
+                            (save-restriction (widen) (point-min)))))
+        body
+      (with-current-buffer buffer
+        (save-restriction
+          (widen)
+          (min body (+ (align-buffer--pixels-between window (point-min)
+                                                     position)
+                       (align-buffer--uncounted-height window (point-min)
+                                                       position))))))))
+
 (defun align-buffer--start-leaving-room (window start rows)
   "Return START, moved back far enough that ROWS screen rows fit below it.
 The end of the buffer leaves fewer, and then the row we wanted for the anchor
@@ -927,28 +985,45 @@ windows itself is sure of being left alone."
            (buffer (window-buffer window))
            (height (max 1 (window-body-height window)))
            (margin (align-buffer-effective-margin window))
-           ;; The row the pair is DRAWN on, which is what the margin counts and
-           ;; is what we are about to put it on.  Divided, as the margin's
-           ;; arithmetic is throughout: it decides only whether point has to
-           ;; come off the pair, and by how many rows.
-           (row (round pixels (align-buffer--row-height window)))
-           (point-row (align-buffer--clamp-point-row
-                       row
-                       (with-current-buffer buffer (= wanted (point-min)))
-                       height margin))
-           (start (align-buffer--start-leaving-room window wanted point-row))
-           (point (align-buffer--follower-point window counterpart row point-row))
+           ;; The row the target asks the pair to be drawn on.  Divided, as
+           ;; the margin's arithmetic is throughout: it decides only whether
+           ;; point has to come off the pair, and by how many rows.
+           (aimed (round pixels (align-buffer--row-height window)))
+           (start (align-buffer--start-leaving-room
+                   window wanted
+                   (align-buffer--clamp-point-row
+                    aimed
+                    (with-current-buffer buffer (= wanted (point-min)))
+                    height margin)))
            ;; Moving the start back for the point row scrolls the window by
            ;; whole rows, and the remainder we measured is no longer its.
-           (vscroll (if (= start wanted) vscroll 0)))
+           (vscroll (if (= start wanted) vscroll 0))
+           ;; The row the pair ends up on, which is the row the target asks
+           ;; for save where no start of this window can reach it: a pair with
+           ;; less than that drawn above it in its own buffer comes no further
+           ;; down than what is above it, there being no start further back to
+           ;; reach for.  Read of the buffer rather than of any start, the
+           ;; start being moved about below and the view that meets the target
+           ;; restored afterwards by the levelling.
+           (row (round (min pixels (align-buffer--pixels-above window
+                                                               counterpart))
+                       (align-buffer--row-height window)))
+           (point-row (align-buffer--clamp-point-row
+                       row
+                       (with-current-buffer buffer (= start (point-min)))
+                       height margin))
+           (point (align-buffer--follower-point window counterpart row
+                                                point-row)))
         ;; A buffer the reader has narrowed cannot be shown from outside the
         ;; part they left accessible, so we leave such a window alone rather
         ;; than writing a start redisplay would have to undo.
         ;;
         (when (with-current-buffer buffer
                 (and (>= start (point-min)) (<= start (point-max))))
-          (let ((moved (not (align-buffer--already-placed-p
-                             window start point vscroll)))
+          (let ((moved (not (or (align-buffer--already-placed-p
+                                 window start point vscroll)
+                                (align-buffer--already-level-p
+                                 window counterpart pixels point))))
                 (lifted nil)
                 (start-stays (= (window-start window) start)))
             (when moved
@@ -1171,7 +1246,14 @@ nothing about."
     (with-demoted-errors "align-buffer scroll sync: %S"
       (let ((ours (align-buffer--own-scroll-p window))
             (align-buffer--in-redisplay t))
-        (unless ours (align-buffer-sync window))))))
+        (unless ours
+          (if (and align-buffer-inhibit-sync align-buffer-held-scroll-function)
+              ;; A consumer holding both panes is the only one that can say
+              ;; what this scroll means for them, and it is the one scroll it
+              ;; cannot hear about any other way: redisplay moving the view
+              ;; after the hook that placed them has been and gone.
+              (funcall align-buffer-held-scroll-function window)
+            (align-buffer-sync window)))))))
 
 (defun align-buffer--level-here-p (window)
   "Return non-nil when the pane facing WINDOW already reads level with it.
