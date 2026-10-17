@@ -129,6 +129,62 @@ side of the boundary, so the lines are what these count."
                           (align-diff-tests--overlays buffer))))))
 
 
+;;; Which backend reads the difference
+
+(defun align-diff-tests--reading (&rest _buffers)
+  "Return a reading of two buffers of three lines against two, made up."
+  (list :pairs '((1 . 1) (3 . 2))
+        :sections '((2 1 2 0))
+        :runs '((left 2 1))
+        :gaps '((right 2 removed 1 2 t))))
+
+(defmacro align-diff-tests--with-backend (reading &rest body)
+  "Run BODY with READING registered as the backend a session is shown with."
+  (declare (indent 1))
+  `(let ((align-diff-backends (copy-alist align-diff-backends))
+         (align-diff-backend 'align-diff-tests))
+     (align-diff-register-backend 'align-diff-tests ,reading)
+     ,@body))
+
+(ert-deftest align-diff-test-a-backend-nobody-registered-is-an-error ()
+  "A name no backend answers to is said so by name."
+  (should-error (align-diff--read 'align-diff-tests-nothing-of-ours
+                                  (current-buffer) (current-buffer))))
+
+(ert-deftest align-diff-test-a-reading-is-what-the-session-shows ()
+  "What a backend reads is what the session pairs, navigates and colours."
+  (align-diff-tests--with-backend #'align-diff-tests--reading
+    (align-diff-tests--with-buffers "one\ntwo\nthree\n" "one\nthree\n"
+      (let ((session (align-diff-buffers old new)))
+        (unwind-protect
+            (progn
+              (should (equal (align-buffer-session-sections session)
+                             '((2 1 2 0))))
+              (should (equal (align-diff--property session :align-diff-pairs)
+                             '((1 . 1) (3 . 2))))
+              (should (equal (align-diff-tests--line-faces old)
+                             '(nil align-diff-removed nil)))
+              (should (equal (align-diff-tests--gaps new) '((1 . slit)))))
+          (align-buffer-quit session))))))
+
+(ert-deftest align-diff-test-a-session-is-read-again-by-the-backend-it-was-shown-with ()
+  "A refresh goes the way the session was shown, whatever the setting says now."
+  (let ((read 0))
+    (align-diff-tests--with-backend (lambda (&rest buffers)
+                                      (setq read (1+ read))
+                                      (apply #'align-diff-tests--reading
+                                             buffers))
+      (align-diff-tests--with-buffers "one\ntwo\nthree\n" "one\nthree\n"
+        (let ((session (align-diff-buffers old new)))
+          (unwind-protect
+              (let ((align-diff-backend 'diff))
+                (align-diff-refresh session)
+                (should (= read 2))
+                (should (equal (align-diff--property session :align-diff-pairs)
+                               '((1 . 1) (3 . 2)))))
+            (align-buffer-quit session)))))))
+
+
 ;;; Reading the hunk headers
 
 (ert-deftest align-diff-test-a-header-without-a-count-means-one-line ()
