@@ -710,6 +710,39 @@ line that had one, rather than scrolling it past content that answers nothing."
     (dolist (buffer (list left right))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest align-buffer-test-the-post-teardown-hook-runs-once-the-owned-are-gone ()
+  "What the hook is handed is a session whose own buffers have already gone."
+  (let* ((left (align-buffer-tests--buffer "align-owned" 20))
+         (right (align-buffer-tests--buffer "align-right" 20))
+         (told nil))
+    (delete-other-windows)
+    (let ((align-buffer-post-teardown-functions
+           (list (lambda (session)
+                   (setq told (cons session (buffer-live-p left)))))))
+      (align-buffer-quit (align-buffer-show left right '((1 . 1))
+                                            (list :owned-buffers (list left)))))
+    (should (align-buffer-session-p (car told)))
+    (should-not (cdr told))
+    (should-not (memq (car told) (align-buffer-sessions)))
+    (when (buffer-live-p right) (kill-buffer right))))
+
+(ert-deftest align-buffer-test-a-side-killed-by-the-pre-teardown-hook-stops-nothing ()
+  "A consumer letting go of a buffer as the session goes leaves the rest to run.
+The teardown has both sides to put back, and one of them is not there."
+  (let* ((left (align-buffer-tests--buffer "align-left" 20))
+         (right (align-buffer-tests--buffer "align-right" 20))
+         (after nil))
+    (delete-other-windows)
+    (let ((align-buffer-pre-teardown-functions
+           (list (lambda (_session) (kill-buffer left))))
+          (align-buffer-post-teardown-functions
+           (list (lambda (_session) (setq after t)))))
+      (align-buffer-quit (align-buffer-show left right '((1 . 1)))))
+    (should after)
+    (should (buffer-live-p right))
+    (with-current-buffer right (should-not align-buffer-mode))
+    (kill-buffer right)))
+
 (ert-deftest align-buffer-test-the-follower-point-lands-on-the-pair ()
   "The point the follower is given is the pair's own line, tall lines or not."
   (align-buffer-tests--with-session '((20 . 20) (30 . 30))

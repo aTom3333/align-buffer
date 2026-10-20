@@ -56,6 +56,11 @@ put the buffers in, as a list."
 (defvar align-buffer-pre-teardown-functions nil
   "Functions run with the session before it is taken apart.")
 
+(defvar align-buffer-post-teardown-functions nil
+  "Functions run with the session once it has been taken apart.
+Its buffers belong to no session any more and the ones it owned are gone, so
+this is where a consumer lets go of what it read for it.")
+
 (defvar align-buffer--tearing-down nil
   "Non-nil while we are taking a session apart.")
 
@@ -177,8 +182,12 @@ was in whichever of them the reader is not standing in."
         (align-buffer-forget-pending-place session)
         ;; After the hook, because it can delete windows on its own.
         (let ((windows (mapcan (lambda (side)
-                                 (get-buffer-window-list
-                                  (align-buffer-buffer session side) nil t))
+                                 ;; A buffer the hook killed has no windows to
+                                 ;; ask about, and asking signals.
+                                 (let ((buffer (align-buffer-buffer session
+                                                                    side)))
+                                   (when (buffer-live-p buffer)
+                                     (get-buffer-window-list buffer nil t))))
                                '(left right))))
           (mapc #'align-buffer-forget-placement windows)
           ;; A window left lifted would show its first line part way off.
@@ -195,7 +204,8 @@ was in whichever of them the reader is not standing in."
         ;; the buffer's, and deleting a window selects another.
         (dolist (side '(left right))
           (align-buffer--restore-point session side here))
-        (align-buffer--kill-owned session)))))
+        (align-buffer--kill-owned session)
+        (run-hook-with-args 'align-buffer-post-teardown-functions session)))))
 
 (defun align-buffer--restore-point (session side here)
   "Put point in SESSION's SIDE buffer back where it was, unless it is HERE.
