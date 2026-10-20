@@ -341,5 +341,60 @@ them again."
         (let ((this-command 'scroll-up-command)) (align-buffer--walk-check))
         (should-not align-buffer-inhibit-sync)))))
 
+;;; What a step reports
+
+;; `line-move' answers whether it moved, and the commands built on it read that
+;; answer: `move-end-of-line' steps a line, is told it moved, and comes back a
+;; character to the newline it passed.  Told otherwise it stops at the
+;; beginning of the next line, and everything measuring a line from there -
+;; evil's `yy', `dd' and `cc' among them - takes a line too many.
+
+(ert-deftest align-buffer-pads-test-a-step-that-moved-says-so ()
+  "A step of a line answers the way `line-move' does, having moved."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 3))
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 1))
+      (should (line-move 1 t))
+      (should (= (line-number-at-pos (point)) 2)))))
+
+(ert-deftest align-buffer-pads-test-a-step-with-nowhere-to-go-says-so ()
+  "A step off the end of the buffer answers that it could not move."
+  (align-buffer-pads-tests--with-session "one\ntwo\n"
+      "one\ntwo\n"
+      '((1 . 1) (2 . 2))
+    (with-selected-window (get-buffer-window left)
+      (goto-char (point-max))
+      (should-not (line-move 1 t)))))
+
+(ert-deftest align-buffer-pads-test-a-step-into-a-pad-says-it-moved ()
+  "A step onto the rows of a pad is a step taken, and answers so."
+  (align-buffer-pads-tests--with-session "one\ntwo\n"
+      "one\na\nb\ntwo\n"
+      '((1 . 1) (2 . 4))
+    (align-buffer-pads-tests--pad left 2 2 right 2)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 1))
+      (should (line-move 1 t))
+      (should (equal (cdr align-buffer--walked) 0))
+      ;; And again, onto the second row of the same pad.
+      (should (line-move 1 t))
+      (should (equal (cdr align-buffer--walked) 1)))))
+
+(ert-deftest align-buffer-pads-test-the-end-of-a-line-is-reached-in-a-pane ()
+  "`move-end-of-line' lands on the end of the line point is on.
+It steps a line and comes back over the newline, so a pane that tells it the
+step failed leaves it at the beginning of the line below, and a command
+measuring a line from there takes in the line after it as well."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 3))
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 2))
+      (move-end-of-line nil)
+      (should (= (point) (line-end-position)))
+      (should (= (line-number-at-pos (point)) 2)))))
+
 (provide 'align-buffer-pads-tests)
 ;;; align-buffer-pads-tests.el ends here

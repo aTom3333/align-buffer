@@ -519,18 +519,17 @@ input is such an event."
 
 (defun align-buffer--step-down (original rest)
   "Take one step down, through a pad's rows where one is on the way.
-Return non-nil when the step was taken here, and nil when ORIGINAL with REST
-has to take it."
+Return non-nil when the reader moved, which is what ORIGINAL with REST answers
+where the step is left to it."
   (pcase align-buffer--walked
     (`(,overlay . ,row)
      (if (< (1+ row) (align-buffer-pad-rows overlay))
-         (align-buffer--walk-into overlay (1+ row) nil t)
+         (progn (align-buffer--walk-into overlay (1+ row) nil t) t)
        ;; Out at the bottom of the rows, onto the line they are drawn in front
        ;; of.  Point is waiting on the line they hang after, so the step down
        ;; is the one the reader asked for and the column is kept by it.
        (align-buffer--walk-away)
-       (apply original 1 rest))
-     t)
+       (apply original 1 rest)))
     (_
      (let* ((next (save-excursion (forward-line 1) (point)))
             (pad (align-buffer-pad-at next)))
@@ -538,14 +537,16 @@ has to take it."
         ((and pad (> (align-buffer-pad-rows pad) 0))
          (align-buffer--walk-into pad 0 nil t)
          t)
-        (t (apply original 1 rest) nil))))))
+        (t (apply original 1 rest)))))))
 
 (defun align-buffer--step-up (original rest)
-  "Take one step up, through a pad's rows where one is on the way."
+  "Take one step up, through a pad's rows where one is on the way.
+Return non-nil when the reader moved, which is what ORIGINAL with REST answers
+where the step is left to it."
   (pcase align-buffer--walked
     (`(,overlay . ,row)
      (if (> row 0)
-         (align-buffer--walk-into overlay (1- row) nil t)
+         (progn (align-buffer--walk-into overlay (1- row) nil t) t)
        ;; Out at the top of the rows, onto the text of the line they hang
        ;; after.  Onto its beginning rather than by a step of `line-move's,
        ;; which counts the rows as a line of their own where they are drawn
@@ -554,15 +555,15 @@ has to take it."
        ;; standing there spends the press after this one getting off them.
        (align-buffer--walk-away)
        (goto-char (align-buffer-pad-hangs overlay))
-       (beginning-of-line))
-     t)
+       (beginning-of-line)
+       t))
     (_
      (let ((pad (align-buffer-pad-at (line-beginning-position))))
        (cond
         ((and pad (> (align-buffer-pad-rows pad) 0))
          (align-buffer--walk-into pad (1- (align-buffer-pad-rows pad)) nil t)
          t)
-        (t (apply original -1 rest) nil))))))
+        (t (apply original -1 rest)))))))
 
 (defun align-buffer--pad-line-move (original count &rest rest)
   "Move COUNT lines, walking the rows of the pads on the way.
@@ -573,11 +574,17 @@ through `line-move', so one interception covers them all.  A buffer with no
 session of ours moves as it always does."
   (if (or (not align-buffer-navigation-mode) (zerop count))
       (apply original count rest)
-    (dotimes (_ (abs count))
-      (if (> count 0)
-          (align-buffer--step-down original rest)
-        (align-buffer--step-up original rest)))
-    nil))
+    ;; Answering whether the reader moved, the way `line-move' does: what is
+    ;; built on it reads that answer, and `move-end-of-line' comes back over
+    ;; the newline it stepped past only when the step is said to have been
+    ;; taken.
+    (let ((moved t))
+      (dotimes (_ (abs count))
+        (when moved
+          (setq moved (if (> count 0)
+                          (align-buffer--step-down original rest)
+                        (align-buffer--step-up original rest)))))
+      moved)))
 
 (advice-add 'line-move :around #'align-buffer--pad-line-move)
 
