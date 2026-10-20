@@ -220,6 +220,36 @@ after it one place along."
                      '(align-diff-removed))))))
 
 
+;;; Which language difftastic is told to parse
+
+(ert-deftest align-diff-difftastic-test-the-consumer-names-the-language ()
+  "`align-diff-language-extension' is read in front of the buffer's own names.
+A buffer holding a revision of a file visits no file, and a name it is given
+instead carries the revision, which can end in anything at all."
+  (let ((buffer (generate-new-buffer "Scene3D.cpp.~origin/master~")))
+    (unwind-protect
+        (progn
+          (should (null (align-diff-difftastic--extension buffer)))
+          (with-current-buffer buffer
+            (setq align-diff-language-extension "cpp"))
+          (should (equal (align-diff-difftastic--extension buffer) "cpp")))
+      (kill-buffer buffer))))
+
+(ert-deftest align-diff-difftastic-test-a-revision-in-the-name-hides-no-extension ()
+  "A name ending in a revision between tildes is read past to the extension."
+  (let ((buffer (generate-new-buffer "Scene3D.cpp.~HEAD~")))
+    (unwind-protect
+        (should (equal (align-diff-difftastic--extension buffer) "cpp"))
+      (kill-buffer buffer))))
+
+(ert-deftest align-diff-difftastic-test-a-name-that-is-no-extension-is-passed-over ()
+  "A name ending in something no file would is left to difftastic's text diff."
+  (let ((buffer (generate-new-buffer "Scene3D.cpp<2>")))
+    (unwind-protect
+        (should (null (align-diff-difftastic--extension buffer)))
+      (kill-buffer buffer))))
+
+
 ;;; What the language buys
 
 (ert-deftest align-diff-difftastic-test-the-language-comes-from-the-buffer-name ()

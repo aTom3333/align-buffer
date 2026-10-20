@@ -165,6 +165,13 @@ since no position in the buffer falls inside them."
   :type 'boolean
   :group 'align-diff)
 
+(defvar-local align-diff-language-extension nil
+  "The extension a backend reads this buffer's language off, as a string.
+Set by whoever puts the text here, and read in front of the buffer's own
+names: a buffer holding a revision of a file visits no file of its own, and
+what its name ends in says nothing about the language.  When nil the names are
+what a backend goes by.")
+
 
 ;;; Which backend reads the difference
 

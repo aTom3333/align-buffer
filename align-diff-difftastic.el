@@ -55,11 +55,15 @@ difftastic does not know, as in \"--override=*.inc:C\"."
       (error "align-diff: %s is not installed" align-diff-difftastic-command)))
 
 (defun align-diff-difftastic--extension (buffer)
-  "Return what BUFFER's name says its language is, as a file extension.
-Nil where the name gives nothing to go by, which leaves difftastic comparing
-the text line by line."
-  (let ((extension (file-name-extension (or (buffer-file-name buffer)
-                                            (buffer-name buffer)))))
+  "Return the extension difftastic should read BUFFER's language off.
+`align-diff-language-extension' where the consumer set one, the name of the
+file BUFFER visits otherwise, and its own name failing that.  Nil where none
+of them gives anything to go by, which leaves difftastic comparing the text
+line by line."
+  (let ((extension (or (buffer-local-value 'align-diff-language-extension
+                                           buffer)
+                       (file-name-extension (or (buffer-file-name buffer)
+                                                (buffer-name buffer))))))
     (and extension
          (string-match-p "\\`[[:alnum:]_+-]+\\'" extension)
          extension)))
