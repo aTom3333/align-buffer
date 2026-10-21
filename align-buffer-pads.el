@@ -165,9 +165,19 @@ which is what lets a walk of the pad scroll the facing window alongside."
       (save-excursion
         (goto-char position)
         (let* ((anchor (point))
+               ;; The end of the line before, where the rows are drawn after
+               ;; its text and in front of the newline closing its row.  An
+               ;; empty line has its end at its own beginning, so rows hung
+               ;; there would be drawn in front of that line rather than after
+               ;; it, and the line would read a pad's height below its pair;
+               ;; they go in front of the line they belong before instead,
+               ;; which is where the first line of a buffer has them too.
                (hangs (if (bobp) anchor
-                        (save-excursion (forward-line -1)
-                                        (line-end-position))))
+                        (save-excursion
+                          (forward-line -1)
+                          (if (= (line-beginning-position) (line-end-position))
+                              anchor
+                            (line-end-position)))))
                ;; A row for every screen row the run is drawn as over there,
                ;; and which line each of them stands for.
                (run (align-buffer--pad-run-rows facing facing-line rows))

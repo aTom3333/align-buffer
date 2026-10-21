@@ -300,6 +300,41 @@ and any command at all that moves point ends the walk, named or not."
       (should-not (align-buffer--walk-kept-p)))))
 
 
+;;; Where rows hang when the line before them is empty
+
+(ert-deftest align-buffer-pads-test-rows-hang-after-an-empty-line ()
+  "Rows whose line before is empty hang where they belong in front of instead.
+
+They are drawn in front of the position they hang at, so the end of the line
+before is exactly right while that line has text: the rows come after it.  An
+empty line's end is its own beginning, and rows hung there are drawn in front
+of the line itself - so that line is drawn a pad's height below its pair while
+everything above and below it is level."
+  (align-buffer-pads-tests--with-session "one\n\nthree\nfour\n"
+      "one\n\na\nb\nthree\nfour\n"
+      '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
+    (let ((overlay (align-buffer-pads-tests--pad left 3 2 right 3)))
+      (should (= (overlay-start overlay)
+                 (align-buffer-line-position left 3)))
+      ;; Which is the shape the rows above the first line of a buffer have,
+      ;; and what tells the drawing it needs no newline to open them.
+      (should (= (overlay-start overlay) (align-buffer-pad-anchor overlay))))))
+
+(ert-deftest align-buffer-pads-test-rows-hang-after-a-line-with-text ()
+  "Rows whose line before has text hang at the end of it, where they come after."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\nfour\n"
+      "one\ntwo\na\nb\nthree\nfour\n"
+      '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
+    (let ((overlay (align-buffer-pads-tests--pad left 3 2 right 3))
+          (ends (with-current-buffer left
+                  (save-excursion
+                    (goto-char (align-buffer-line-position left 2))
+                    (line-end-position)))))
+      (should (= (overlay-start overlay) ends))
+      (should-not (= (overlay-start overlay)
+                     (align-buffer-pad-anchor overlay))))))
+
+
 ;;; A step asked for against a line being measured
 
 (ert-deftest align-buffer-pads-test-measuring-a-line-end-takes-no-step ()
