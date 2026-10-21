@@ -300,6 +300,37 @@ and any command at all that moves point ends the walk, named or not."
       (should-not (align-buffer--walk-kept-p)))))
 
 
+;;; A step asked for against a line being measured
+
+(ert-deftest align-buffer-pads-test-measuring-a-line-end-takes-no-step ()
+  "`move-end-of-line' steps a line to find where the one it is on ends.
+It does that inside `save-excursion' and with the goal column held at nothing,
+so it is not a reader going anywhere: a step onto a pad's rows there moves the
+cursor, starts a walk of a line nobody asked for, and leaves the line a
+linewise operator measures the wrong one."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\na\nb\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 5))
+    (align-buffer-pads-tests--pad left 3 2 right 3)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 2))
+      (move-end-of-line nil)
+      (should (null align-buffer--walked))
+      (should (= (point) (line-end-position)))
+      (should (= (line-number-at-pos) 2)))))
+
+(ert-deftest align-buffer-pads-test-a-step-of-the-reader-s-own-still-walks ()
+  "A vertical motion asks `line-move' for a move, and still reaches the rows."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\na\nb\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 5))
+    (align-buffer-pads-tests--pad left 3 2 right 3)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 2))
+      (call-interactively #'next-line)
+      (should (equal (cdr align-buffer--walked) 0)))))
+
+
 ;;; The cursor against another package's own idea of where it goes
 
 ;; A row carries the cursor only while point is where the rows are drawn, and

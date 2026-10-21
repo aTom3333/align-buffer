@@ -575,6 +575,21 @@ where the step is left to it."
          t)
         (t (apply original -1 rest)))))))
 
+(defun align-buffer--pad-measuring-p (noerror)
+  "Return non-nil when this `line-move' is measuring rather than moving.
+
+`move-end-of-line' and `move-beginning-of-line' step a line to find where the
+line they are on ends, inside `save-excursion' and with the goal column held
+at nothing, and they ask not to be told when there is nowhere to go.  Nobody
+has asked to move: a step onto a pad's rows from there would move the cursor
+and start a walk of a line the reader is not on, and the line a command built
+on it goes on to measure would be the wrong one.
+
+Told apart by how `line-move' is called rather than by who called it, since
+what a reader presses for a line reaches us under any name at all: evil's own
+sets `this-command' to `next-line' for both."
+  (and noerror (eql goal-column 0)))
+
 (defun align-buffer--pad-line-move (original count &rest rest)
   "Move COUNT lines, walking the rows of the pads on the way.
 
@@ -582,7 +597,8 @@ Caught here rather than under the names of the commands that move a line:
 `next-line', `previous-line' and every third-party motion built on them come
 through `line-move', so one interception covers them all.  A buffer with no
 session of ours moves as it always does."
-  (if (or (not align-buffer-navigation-mode) (zerop count))
+  (if (or (not align-buffer-navigation-mode) (zerop count)
+          (align-buffer--pad-measuring-p (car rest)))
       (apply original count rest)
     ;; Answering whether the reader moved, the way `line-move' does: what is
     ;; built on it reads that answer, and `move-end-of-line' comes back over
