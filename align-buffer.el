@@ -180,8 +180,10 @@ was in whichever of them the reader is not standing in."
         (run-hook-with-args 'align-buffer-pre-teardown-functions session)
         ;; After that hook, which runs on a session that is still up, and
         ;; before everything below, which is the taking apart itself: a handle
-        ;; kept from here on answers that the session has gone.
-        (setf (align-buffer-session-torn-down session) t)
+        ;; kept from here on answers that the session has gone.  Ignoring a
+        ;; session made before this slot existed, which reads as gone already.
+        (ignore-error args-out-of-range
+          (setf (align-buffer-session-torn-down session) t))
         (setq align-buffer--sessions (delq session align-buffer--sessions))
         (align-buffer-forget-pending-place session)
         ;; After the hook, because it can delete windows on its own.

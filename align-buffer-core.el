@@ -82,13 +82,25 @@ handle kept across that answer for itself."
   (setq align-buffer--sessions
         (seq-filter #'align-buffer-session-live-p align-buffer--sessions)))
 
+(defun align-buffer-session-gone-p (session)
+  "Return non-nil when SESSION has been taken apart, or was made before this.
+
+A handle is held in timers and hooks, so rebuilding the package while a
+session is up leaves one behind with fewer slots than a session has now.  Such
+a handle belongs to code that is no longer here, so it reads as a session that
+has gone: the timer holding it stops on its own, where asking it for a slot it
+has not got would signal every time it ran."
+  (condition-case nil
+      (align-buffer-session-torn-down session)
+    (args-out-of-range t)))
+
 (defun align-buffer-session-live-p (session)
   "Return non-nil while SESSION is up: not taken apart, and both buffers alive.
 
 Both buffers outlive an ordinary session, a reader's own file buffers among
 them, so what a handle kept across a teardown has to answer is whether the
 session is still there, not whether its two buffers are."
-  (and (not (align-buffer-session-torn-down session))
+  (and (not (align-buffer-session-gone-p session))
        (buffer-live-p (align-buffer-session-left-buffer session))
        (buffer-live-p (align-buffer-session-right-buffer session))))
 

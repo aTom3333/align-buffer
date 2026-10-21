@@ -703,6 +703,23 @@ whoever kept the handle has no other way to ask whether it is still good."
     (dolist (buffer (list left right))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest align-buffer-test-a-session-from-an-older-definition-reads-as-gone ()
+  "A handle made before this definition was loaded reads as a session gone.
+Handles are held in timers and hooks, so a reader who rebuilds the package
+while a session is up leaves one behind with fewer slots than the session has
+now.  Asking it for a slot it has not got signals, and from an idle timer that
+is a signal twice a second with a debugger on top of it."
+  (let ((left (align-buffer-tests--buffer "align-left" 5))
+        (right (align-buffer-tests--buffer "align-right" 5)))
+    (unwind-protect
+        ;; The shape a session had before it carried whether it was torn down.
+        (let ((stale (record 'align-buffer-session left right
+                             nil nil nil nil nil nil nil)))
+          (should (align-buffer-session-p stale))
+          (should-not (align-buffer-session-live-p stale)))
+      (dolist (buffer (list left right))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest align-buffer-test-a-session-whose-buffer-died-is-no-longer-live ()
   "A buffer killed out of band ends the session, handle and all."
   (let ((left (align-buffer-tests--buffer "align-left" 20))
