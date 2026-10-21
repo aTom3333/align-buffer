@@ -686,6 +686,33 @@ line that had one, rather than scrolling it past content that answers nothing."
           (with-current-buffer right (should-not align-buffer-mode)))
       (when (buffer-live-p right) (kill-buffer right)))))
 
+(ert-deftest align-buffer-test-a-session-taken-apart-is-no-longer-live ()
+  "A handle answers for the session, not for the two buffers it was over.
+Both of them outlive an ordinary session - a reader's own file buffers - so
+whoever kept the handle has no other way to ask whether it is still good."
+  (let ((left (align-buffer-tests--buffer "align-left" 20))
+        (right (align-buffer-tests--buffer "align-right" 20)))
+    (delete-other-windows)
+    (let ((session (align-buffer-show left right '((1 . 1)))))
+      (should (align-buffer-session-live-p session))
+      (align-buffer-quit session)
+      (should (buffer-live-p left))
+      (should (buffer-live-p right))
+      (should-not (align-buffer-session-live-p session))
+      (should-not (memq session (align-buffer-sessions))))
+    (dolist (buffer (list left right))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest align-buffer-test-a-session-whose-buffer-died-is-no-longer-live ()
+  "A buffer killed out of band ends the session, handle and all."
+  (let ((left (align-buffer-tests--buffer "align-left" 20))
+        (right (align-buffer-tests--buffer "align-right" 20)))
+    (delete-other-windows)
+    (let ((session (align-buffer-show left right '((1 . 1)))))
+      (kill-buffer left)
+      (should-not (align-buffer-session-live-p session)))
+    (when (buffer-live-p right) (kill-buffer right))))
+
 (ert-deftest align-buffer-test-a-session-can-own-buffers ()
   "A consumer that made a buffer to show names it, and it goes at teardown."
   (let* ((left (align-buffer-tests--buffer "align-owned" 20))

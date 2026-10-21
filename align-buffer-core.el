@@ -47,7 +47,10 @@ between.
 
 PROPERTIES is a plist the consumer keeps its own state in.  One key is read
 from it: `:owned-buffers', a list of buffers to kill when the session ends,
-for a consumer that made a buffer to show."
+for a consumer that made a buffer to show.
+
+TORN-DOWN is set when the session is taken apart, which is what makes a
+handle kept across that answer for itself."
   left-buffer
   right-buffer
   left-index
@@ -56,7 +59,8 @@ for a consumer that made a buffer to show."
   right-point
   windows
   sections
-  properties)
+  properties
+  torn-down)
 
 
 ;;; Buffer-local state
@@ -79,8 +83,13 @@ for a consumer that made a buffer to show."
         (seq-filter #'align-buffer-session-live-p align-buffer--sessions)))
 
 (defun align-buffer-session-live-p (session)
-  "Return non-nil when both of SESSION's buffers are still alive."
-  (and (buffer-live-p (align-buffer-session-left-buffer session))
+  "Return non-nil while SESSION is up: not taken apart, and both buffers alive.
+
+Both buffers outlive an ordinary session, a reader's own file buffers among
+them, so what a handle kept across a teardown has to answer is whether the
+session is still there, not whether its two buffers are."
+  (and (not (align-buffer-session-torn-down session))
+       (buffer-live-p (align-buffer-session-left-buffer session))
        (buffer-live-p (align-buffer-session-right-buffer session))))
 
 (defun align-buffer-current-session ()
