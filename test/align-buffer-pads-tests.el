@@ -300,6 +300,78 @@ and any command at all that moves point ends the walk, named or not."
       (should-not (align-buffer--walk-kept-p)))))
 
 
+;;; The cursor against another package's own idea of where it goes
+
+;; A row carries the cursor only while point is where the rows are drawn, and
+;; evil moves the cursor one character back off the end of a line after every
+;; command it runs.  So the walk has to survive a nudge along that line, and
+;; point has to be put back where the rows are before the screen is drawn.
+
+(ert-deftest align-buffer-pads-test-a-nudge-along-the-line-is-taken-back ()
+  "Point nudged along the line the rows hang on goes back where they are drawn.
+Off that line it is the reader's own, and nothing is taken back: the walk is
+over by then and the cursor belongs to the text."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\na\nb\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 5))
+    (align-buffer-pads-tests--pad left 3 2 right 3)
+    (with-current-buffer left
+      (goto-char (align-buffer-line-position left 2))
+      (call-interactively #'next-line)
+      (let ((hangs (align-buffer-pad-hangs (car align-buffer--walked))))
+        (should (= (point) hangs))
+        (backward-char 1)
+        (align-buffer--walk-hold-point)
+        (should (= (point) hangs))
+        ;; Another line is the reader having moved, and stays theirs.
+        (goto-char (align-buffer-line-position left 1))
+        (align-buffer--walk-hold-point)
+        (should (= (point) (align-buffer-line-position left 1)))))))
+
+(ert-deftest align-buffer-pads-test-the-reader-moving-along-the-line-ends-it ()
+  "A command of the reader's that moves point along that line is not a nudge.
+Only the command that stepped is allowed one, so standing on the line a pad
+hangs on is standing on the line rather than reading its rows."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\na\nb\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 5))
+    (align-buffer-pads-tests--pad left 3 2 right 3)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 2))
+      (let ((this-command 'next-line))
+        (call-interactively #'next-line)
+        (align-buffer--walk-check))
+      (should align-buffer--walked)
+      ;; A command of their own, a press later, along the same line.
+      (let ((this-command 'backward-char))
+        (backward-char 1)
+        (align-buffer--walk-check))
+      (should (null align-buffer--walked))
+      (should-not (= (point) (align-buffer-line-position left 2))))))
+
+(ert-deftest align-buffer-pads-test-a-pullback-leaves-the-row-its-cursor ()
+  "A package pulling the cursor back after the command has point put back.
+Whoever moved it ran in the same hook, so what decides is that we run after
+them: the row is drawn from where point is, and nothing else gets a say once
+the command is over."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\n"
+      "one\ntwo\na\nb\nthree\n"
+      '((1 . 1) (2 . 2) (3 . 5))
+    (align-buffer-pads-tests--pad left 3 2 right 3)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 2))
+      ;; Added the way evil adds its own, which is in front of ours.
+      (add-hook 'post-command-hook #'backward-char nil t)
+      (unwind-protect
+          (let ((this-command 'next-line))
+            (call-interactively #'next-line)
+            (run-hooks 'post-command-hook)
+            (should align-buffer--walked)
+            (should (= (point)
+                       (align-buffer-pad-hangs (car align-buffer--walked)))))
+        (remove-hook 'post-command-hook #'backward-char t)))))
+
+
 ;;; Scrolling through the rows
 
 (ert-deftest align-buffer-pads-test-a-scroll-that-moves-nothing-says-so ()

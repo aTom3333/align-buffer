@@ -28,6 +28,11 @@
 (defvar-local align-buffer--walked nil
   "The pad being walked and the row the cursor is on, as (OVERLAY . ROW).")
 
+(defvar-local align-buffer--walk-stepped nil
+  "Non-nil when the command being run has stepped onto a row of a pad.
+Read once the command is over and cleared there, which is what tells a cursor
+another package moved afterwards from point the reader moved themselves.")
+
 (defun align-buffer--pads-in-p (buffer)
   "Return non-nil when BUFFER has had pads of ours put in it."
   (and (buffer-live-p buffer)
@@ -353,6 +358,7 @@ is what a scroll of the reader's asks for."
   (let ((window (or window (selected-window))))
     (align-buffer--pad-show-cursor overlay row)
     (setq align-buffer--walked (and row (cons overlay row)))
+    (setq align-buffer--walk-stepped (and row t))
     ;; Both windows are ours while a pad is walked: the pairs say nothing
     ;; about a row that stands for a line this side has not got, so the sync
     ;; would pull them back to the pair below the pad.
@@ -502,6 +508,9 @@ input is such an event."
         ;; panes are ours, and the sync has to read that decision rather than
         ;; place them first and be corrected.
         (add-hook 'post-command-hook #'align-buffer--walk-check nil t)
+        ;; Last of all, so that point is where the row being read is drawn
+        ;; whatever else in the hook has moved it.
+        (add-hook 'post-command-hook #'align-buffer--walk-hold-point 100 t)
         ;; Where it beats the other minor modes rather than taking its turn
         ;; among them: `pixel-scroll-precision-mode' binds the wheel too, and
         ;; its notches scroll a window by pixels of its own without a word to
@@ -513,6 +522,7 @@ input is such an event."
                                            minor-mode-overriding-map-alist))))
     (align-buffer--walk-away)
     (remove-hook 'post-command-hook #'align-buffer--walk-check t)
+    (remove-hook 'post-command-hook #'align-buffer--walk-hold-point t)
     (setq-local minor-mode-overriding-map-alist
                 (assq-delete-all 'align-buffer-navigation-mode
                                  minor-mode-overriding-map-alist))))
@@ -1029,16 +1039,49 @@ window - which hands it the lead and has the two panes placing each other."
 
 Point stays on the line a pad hangs on for as long as its rows are walked,
 which is what lets any command whatever be told apart from a step of the
-walk: a point somewhere else is a command having moved it, and the walk is
+walk: a point on another line is a command having moved it, and the walk is
 over.  Told apart by what the command did rather than by its name, so the
 unbounded set of commands that move point needs no list, and a command that
 moves neither point nor the view - a prefix key, `execute-extended-command',
-a look at the documentation - leaves the reader where they were."
+a look at the documentation - leaves the reader where they were.
+
+A step taken by the command just run is the one case where point elsewhere on
+that line is not the reader's doing: another package has adjusted the cursor
+between the step and this, as evil does off the end of a line, and the row is
+still what the reader asked for."
   (pcase align-buffer--walked
     (`(,overlay . ,_)
      (and (overlay-buffer overlay)
           (eq (current-buffer) (overlay-buffer overlay))
-          (= (point) (align-buffer-pad-hangs overlay))))))
+          (let ((hangs (align-buffer-pad-hangs overlay)))
+            (or (= (point) hangs)
+                (and align-buffer--walk-stepped
+                     (= (line-beginning-position)
+                        (save-excursion (goto-char hangs)
+                                        (line-beginning-position))))))))))
+
+(defun align-buffer--walk-hold-point ()
+  "Put point back where the rows being walked are drawn.
+
+A row carries the cursor through the one glyph of it point stands on, so
+point left anywhere else draws the cursor on the text instead and the reader
+sees nothing of the row they are reading.  What moves it there is another
+package adjusting the cursor once the command is over - evil pulls it back
+off the end of a line after every command - so this runs after everything
+else in the hook, and takes back only that much: a walk the check before it
+has already ended is over, and point on another line is the reader's own."
+  (pcase align-buffer--walked
+    (`(,overlay . ,_)
+     (when (and (overlay-buffer overlay)
+                (eq (current-buffer) (overlay-buffer overlay)))
+       (let ((hangs (align-buffer-pad-hangs overlay)))
+         (when (and (/= (point) hangs)
+                    (= (line-beginning-position)
+                       (save-excursion (goto-char hangs)
+                                       (line-beginning-position))))
+           (goto-char hangs)
+           (dolist (window (get-buffer-window-list (current-buffer) nil t))
+             (set-window-point window hangs))))))))
 
 (defun align-buffer--settle-scroll (window)
   "Put the cursor on the row of a pad WINDOW has just been scrolled to.
@@ -1104,7 +1147,10 @@ through that to last longer than a single press."
            (window (if (window-live-p scrolled) scrolled (selected-window))))
       (setq align-buffer--scrolled-window nil)
       (with-current-buffer (window-buffer window)
-        (align-buffer--walk-check-1 window scrolled)))))
+        (align-buffer--walk-check-1 window scrolled)
+        ;; Once the command it belongs to has been judged, so the next one is
+        ;; judged by where point is and nothing else.
+        (setq align-buffer--walk-stepped nil)))))
 
 (defun align-buffer--walk-check-1 (window scrolled)
   "Keep or end the walk of a pad in WINDOW, SCROLLED when a scroll moved it."
