@@ -101,6 +101,37 @@ off."
                     (align-diff-difftastic-tests--reading old new))
                    '((left 2 1) (right 2 1))))))
 
+(ert-deftest align-diff-difftastic-test-a-hunk-is-coloured-through-its-blank-lines ()
+  "Every line of a hunk is coloured, whatever difftastic found tokens on.
+A blank line holds no token, so it is in none of the chunks, and a colour
+taken from the chunks would stop at it: the reader is then shown one added
+function as two or three blocks with bare lines between them."
+  (align-diff-difftastic-tests--with-buffers
+      "cpp" "int kept(void)\n{\n  return 1;\n}\n"
+      "int kept(void)\n{\n  return 1;\n}\n\nint added(void)\n{\n\n  return 2;\n}\n"
+    (let ((reading (align-diff-difftastic-tests--reading old new)))
+      (should (equal (align-diff-reading-sections reading) '((5 0 5 6))))
+      (should (equal (align-diff-reading-runs reading) '((right 5 6)))))))
+
+(ert-deftest align-diff-difftastic-test-the-tokens-alone-are-marked-inside-it ()
+  "The characters marked inside a hunk are still difftastic's own tokens.
+The colour covering the whole hunk is the line level; a blank line holds
+nothing to mark, and the lines that do are marked where their tokens are."
+  (align-diff-difftastic-tests--with-buffers
+      "cpp" "int kept(void)\n{\n  return 1;\n}\n"
+      "int kept(void)\n{\n  return 1;\n}\n\nint added(void)\n{\n\n  return 2;\n}\n"
+    (let ((refine (align-diff-reading-refine
+                   (align-diff-difftastic-tests--reading old new))))
+      (should (eq (car refine) 'ranges))
+      ;; The blank lines of the hunk, 5 and 8, have nothing marked on them.
+      (should (null (seq-filter (lambda (range)
+                                  (memq (nth 1 range) '(5 8)))
+                                (cdr refine))))
+      ;; And a line that holds tokens has them marked, not its whole width.
+      (should (equal (seq-filter (lambda (range) (= (nth 1 range) 7))
+                                 (cdr refine))
+                     '((right 7 0 1)))))))
+
 (ert-deftest align-diff-difftastic-test-an-addition-colours-the-new-side-alone ()
   "An added line is coloured where it was added and nowhere else."
   (align-diff-difftastic-tests--with-buffers

@@ -127,18 +127,19 @@ version to the next, so the variable is set for the one call."
           (push line changed))))
     (sort (delete-dups changed) #'<)))
 
-(defun align-diff-difftastic--runs (lines side)
-  "Return LINES as the runs of consecutive lines to colour on SIDE."
-  (let ((runs nil)
-        (first nil)
-        (last nil))
-    (dolist (line lines)
-      (cond ((null first) (setq first line last line))
-            ((= line (1+ last)) (setq last line))
-            (t (push (list side first (1+ (- last first))) runs)
-               (setq first line last line))))
-    (when first
-      (push (list side first (1+ (- last first))) runs))
+(defun align-diff-difftastic--runs (stretches)
+  "Return the lines STRETCHES cover, as the runs to colour.
+
+A stretch is coloured whole, through the lines of it difftastic found no
+token on: which characters differ is what the chunks say and what the
+refinement marks, while the colour says which lines the change covers.  A
+blank line is in no chunk, so a colour taken from the chunks would stop at
+every one of them and show one change as several."
+  (let ((runs nil))
+    (dolist (stretch stretches)
+      (dolist (side '(left right))
+        (when-let ((span (align-diff-difftastic--span (car stretch) side)))
+          (push (list side (car span) (cdr span)) runs))))
     (nreverse runs)))
 
 
@@ -359,8 +360,7 @@ for one."
         (list :pairs (align-diff-difftastic--pairs entries)
               :sections (align-diff-difftastic--sections
                          stretches old-lines new-lines)
-              :runs (append (align-diff-difftastic--runs left-changed 'left)
-                            (align-diff-difftastic--runs right-changed 'right))
+              :runs (align-diff-difftastic--runs stretches)
               :gaps (align-diff-difftastic--gaps stretches old-lines new-lines)
               :refine
               (cons 'ranges
