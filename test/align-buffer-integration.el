@@ -711,6 +711,50 @@ a line the reader has read past far enough for it to have left the top."
      (align-buffer-pad-height window pad))
     (align-buffer-quit session)))
 
+(align-buffer-integration-defscenario a-widened-pane-keeps-the-reader-in-the-pad
+  ;; A reader standing on a row of a pad stays on it while the pane they are in
+  ;; is widened.  The facing window is narrower for it, so the run those rows
+  ;; stand for wraps into more of them, and the row being read is still the
+  ;; reader's own once the pad has been measured against it again.
+  (let* ((session (align-buffer-integration--session))
+         (left (align-buffer-session-left-buffer session))
+         (window (get-buffer-window left))
+         (pad nil))
+    (align-buffer-integration--wrap session 'right 50 6)
+    (setq pad (align-buffer-pad-add
+               left (align-buffer-line-position left 50) 6
+               'font-lock-string-face
+               (align-buffer-session-right-buffer session) 50))
+    (with-current-buffer left (align-buffer-navigation-mode 1))
+    (align-buffer-integration--view session 'left 40 49)
+    ;; Onto the rows, a row at a time, which is what a motion command does
+    ;; where a pad hangs.
+    (select-window window)
+    (align-buffer-integration--keys "C-n C-n C-n")
+    ;; The row read out of the pair rather than the pair itself, which the
+    ;; measure writes a new row into in place.
+    (let ((walked (buffer-local-value 'align-buffer--walked left))
+          (line (align-buffer-line-at left (window-point window))))
+      (align-buffer-integration--expect
+       'a-widened-pane-keeps-the-reader-in-the-pad
+       "the reader is reading a row of the pad"
+       pad (car-safe walked))
+      (let ((was (cdr-safe walked)))
+        (with-selected-window window
+          (dotimes (_ 10)
+            (enlarge-window-horizontally 2)
+            (redisplay t)))
+        (align-buffer-integration--settle)
+        (align-buffer-integration--expect
+         'a-widened-pane-keeps-the-reader-in-the-pad
+         "and is left on the line the pad hangs above"
+         line (align-buffer-line-at left (window-point window)))
+        (align-buffer-integration--expect
+         'a-widened-pane-keeps-the-reader-in-the-pad
+         "on the row of it they were reading"
+         was (cdr (buffer-local-value 'align-buffer--walked left)))))
+    (align-buffer-quit session)))
+
 (align-buffer-integration-defscenario a-widened-pane-is-levelled-again
   ;; No pads here: a window of another width wraps its own lines into another
   ;; number of rows, so the line the pair speaks for is drawn somewhere else

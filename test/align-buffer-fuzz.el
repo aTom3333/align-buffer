@@ -1083,6 +1083,15 @@ is still on its way."
     (format "%s the pane by %s column(s), %s press(es)"
             (if grow "widen" "narrow") taken presses)))
 
+(defun align-buffer-fuzz--resizing-p (move)
+  "Return non-nil when MOVE resizes the pane the reader is in."
+  (memq move '(wider narrower wider-held narrower-held)))
+
+(defun align-buffer-fuzz--reader-line ()
+  "Return the line the reader is on, in the pane they are standing in."
+  (let ((window (selected-window)))
+    (align-buffer-line-at (window-buffer window) (window-point window))))
+
 (defun align-buffer-fuzz--move (move)
   "Take one MOVE in SESSION and return what to call it.
 The steps that stand for a key go in as real input, so the command runs and
@@ -1140,7 +1149,11 @@ a jump to a line and a recenter - ask for the placement themselves."
          ;; can be told apart from another one beginning at the same line.
          (going (and (memq move '(section-down section-up))
                      (align-buffer-fuzz--section-ahead
-                      session (eq move 'section-down)))))
+                      session (eq move 'section-down))))
+         ;; And where the reader stands before a resize, which asks for no
+         ;; motion at all.
+         (standing (and (align-buffer-fuzz--resizing-p move)
+                        (align-buffer-fuzz--reader-line))))
     (condition-case error
         (setq label (align-buffer-fuzz--move move))
       ;; An arrow at the last line signals, which is Emacs and not the sync.
@@ -1167,6 +1180,17 @@ a jump to a line and a recenter - ask for the placement themselves."
     (when (and going (not refused))
       (setq faults (append faults
                            (align-buffer-fuzz--centring-faults going))))
+    ;; A resize asks for no motion, so the line the reader is on is the line
+    ;; they are left on: the pane changes width under the view, and whatever
+    ;; the panes have to do to read level again they do by placing the facing
+    ;; one, not by taking the reader somewhere else.
+    (when (and standing (not refused))
+      (let ((left-on (align-buffer-fuzz--reader-line)))
+        (unless (equal standing left-on)
+          (push (cons 'moved-point
+                      (format "the reader was on line %s and the resize left them on line %s"
+                              standing left-on))
+                faults))))
     (let ((swapped (not (eq was (selected-window)))))
       (setq faults (append faults (align-buffer-fuzz--check session swapped)))
       (when align-buffer-fuzz-ask-again
