@@ -1488,22 +1488,32 @@ line drawn at another height moves is the pane facing it."
     (mapc #'align-buffer-forget-placement windows)
     (when (window-live-p leader)
       (with-current-buffer (window-buffer leader)
-        ;; The same answers as a scroll of the reader's: the row of a pad being
-        ;; read is what the facing pane comes level with, a run of the facing
-        ;; side's speaks for the view where point is inside one, and a line of
-        ;; the reader's own is what the pairs speak for.
-        (if align-buffer--walked
+        (let* ((side align-buffer--side)
+               (line (align-buffer-line-at (current-buffer)
+                                           (window-point leader))))
+          ;; The same three answers as a scroll of the reader's.
+          (cond
+           ;; The row of a pad being read is what the facing pane comes level
+           ;; with.
+           (align-buffer--walked
             (align-buffer--pad-face-row leader (car align-buffer--walked)
-                                        (cdr align-buffer--walked))
-          ;; `align-buffer--face-run' places the pane where such a run speaks
-          ;; and takes no placement at all otherwise, leaving that to the
-          ;; ordinary one, which a scroll gets from the hook that heard it and
-          ;; a size change has to ask for here.  A run it has just left is
-          ;; placed by the sync of its own that it makes.
-          (let ((held align-buffer-inhibit-sync))
-            (align-buffer--face-run leader)
-            (unless (or held align-buffer-inhibit-sync)
-              (align-buffer-sync leader))))))))
+                                        (cdr align-buffer--walked)))
+           ;; Inside a run the other side has not got, the rows standing for it
+           ;; are, the pairs saying nothing there.
+           ((and side line
+                 (align-buffer--facing-pad session side line leader))
+            (align-buffer--face-run leader))
+           ;; Elsewhere the pairs speak, which is the ordinary placement.  A
+           ;; scroll gets it from the hook that heard the scroll; a size
+           ;; change has to ask for it here, and for the last pixels of it
+           ;; after it, a placement landing on a row boundary.
+           (t
+            ;; A hold taken for a run the view has since left would keep the
+            ;; placement from being made at all.
+            (when align-buffer-inhibit-sync (align-buffer--walk-away))
+            (align-buffer-sync leader)
+            (when (align-buffer--exact-p session)
+              (align-buffer--finish-level leader)))))))))
 
 (defun align-buffer--measure-and-level ()
   "Measure every session's pads again, and place its panes level afresh."
