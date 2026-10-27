@@ -78,8 +78,14 @@ reach, since the second placement is one nothing but the walk asks for.")
 (defvar align-buffer-fuzz--shape nil
   "What the current run's seed built, for the report to name.")
 
+(defvar align-buffer-fuzz--label nil
+  "What the step just taken is called.")
+
 (defvar align-buffer-fuzz--unreachable 0
   "Steps of the current run where no start of the follower could be level.")
+
+(defvar align-buffer-fuzz--unsettled 0
+  "Steps of the current run read with something of ours still queued.")
 
 (defvar align-buffer-fuzz--padded 0
   "How many steps had a pad's row to be level with instead of a pair.")
@@ -729,6 +735,13 @@ pane still on its way."
                   (1+ align-buffer-fuzz--reversals)))
           (unless (member position seen) (push position seen))))
       (setq rounds (1+ rounds)))
+    ;; A walk that stepped on while the panes were still on their way is a
+    ;; walk whose later steps start from somewhere a seed does not describe,
+    ;; so the rounds running out is counted and reported rather than passed
+    ;; over: it is what tells a run with faults nobody can replay from the
+    ;; machine simply being busy.
+    (when (align-buffer-fuzz--busy-p)
+      (setq align-buffer-fuzz--unsettled (1+ align-buffer-fuzz--unsettled)))
     (length seen)))
 
 
@@ -1191,6 +1204,7 @@ a jump to a line and a recenter - ask for the placement themselves."
                       (format "the reader was on line %s and the resize left them on line %s"
                               standing left-on))
                 faults))))
+    (setq align-buffer-fuzz--label label)
     (let ((swapped (not (eq was (selected-window)))))
       (setq faults (append faults (align-buffer-fuzz--check session swapped)))
       (when align-buffer-fuzz-ask-again
@@ -1239,6 +1253,7 @@ and step number alone."
   (setq align-buffer-fuzz--unanchored 0)
   (setq align-buffer-fuzz--padded 0)
   (setq align-buffer-fuzz--unreachable 0)
+  (setq align-buffer-fuzz--unsettled 0)
   (let ((session (align-buffer-fuzz--session)))
     (when session
       (align-buffer-fuzz--settle)
@@ -1293,6 +1308,7 @@ reported can be read in full without guessing at the state behind it."
   (setq align-buffer-fuzz--unanchored 0)
   (setq align-buffer-fuzz--padded 0)
   (setq align-buffer-fuzz--unreachable 0)
+  (setq align-buffer-fuzz--unsettled 0)
   (let ((session (align-buffer-fuzz--session))
         (lines nil))
     (when session
@@ -1303,8 +1319,9 @@ reported can be read in full without guessing at the state behind it."
         (let* ((number (1+ one))
                (before (length align-buffer-fuzz--faults))
                (move (align-buffer-fuzz--step session seed number)))
-          (push (format "  step %-3s %s" number
-                        (align-buffer-fuzz--state-of session))
+          (push (format "  step %-3s (%s)" number align-buffer-fuzz--label)
+                lines)
+          (push (format "           %s" (align-buffer-fuzz--state-of session))
                 lines)
           (when (> (length align-buffer-fuzz--faults) before)
             (dolist (fault (reverse move))
@@ -1385,12 +1402,15 @@ ALIGN_BUFFER_FUZZ_MAXIMIZED a frame as big as the screen."
                                                         "leader's top, %s with "
                                                         "no start that could be "
                                                         "level, %s with a row "
-                                                        "to be level with")
+                                                        "to be level with, %s "
+                                                        "read before the panes "
+                                                        "had settled")
                                                 seed align-buffer-fuzz--shape
                                                 (length faults)
                                                 align-buffer-fuzz--unanchored
                                                 align-buffer-fuzz--unreachable
-                                                align-buffer-fuzz--padded))
+                                                align-buffer-fuzz--padded
+                                                align-buffer-fuzz--unsettled))
                                   faults))
                     (message "align-buffer fuzz: seed %s, %d fault(s)"
                              seed (length faults))))
