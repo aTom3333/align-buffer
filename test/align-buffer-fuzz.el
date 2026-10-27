@@ -4,7 +4,9 @@
 
 ;; A seed builds two buffers and a correspondence between them, and then a walk
 ;; over them: arrows, pages, wheel notches, single-row scrolls, jumps to a line,
-;; moves from one marked stretch to the next, and swaps of which window leads.
+;; moves from one marked stretch to the next, swaps of which window leads, and
+;; resizes of the pane the reader is in, one press at a time and several in a
+;; row the way a repeating key gives them.
 ;; After every step the two windows are read back and checked against what the
 ;; sync promises, so a seed either passes or names the step it broke on and the
 ;; numbers it broke with.
@@ -227,6 +229,8 @@ more than the font asks for."
       (local-set-key (kbd "C-c p") #'align-buffer-previous-section)
       (local-set-key (kbd "C-c g") #'align-buffer-fuzz-goto-line)
       (local-set-key (kbd "C-c l") #'align-buffer-fuzz-recenter)
+      (local-set-key (kbd "C-c w") #'align-buffer-fuzz-widen-pane)
+      (local-set-key (kbd "C-c s") #'align-buffer-fuzz-narrow-pane)
       (set-buffer-modified-p nil)
       (goto-char (point-min)))
     buffer))
@@ -670,6 +674,7 @@ against two builds of it and the two counts compared."
   "Return non-nil while align-buffer still has something of its own queued."
   (or align-buffer--pending-timer
       align-buffer--pending-place
+      (bound-and-true-p align-buffer--resize-timer)
       (bound-and-true-p align-buffer--wait-timer)
       (bound-and-true-p align-buffer--pending-paint)))
 
@@ -987,7 +992,8 @@ window, a command that leaves the leader's line alone."
 (defconst align-buffer-fuzz--moves
   '(down down down down up up up next prior wheel-down wheel-down wheel-up
          scroll-row-down scroll-row-down scroll-row-up top bottom recenter
-         jump jump lead forward back section-down section-down section-up)
+         jump jump lead forward back section-down section-down section-up
+         wider narrower wider-held narrower-held)
   "The steps a walk is drawn from, named repeatedly to weight the draw.")
 
 (defvar align-buffer-fuzz-line 1
@@ -1017,6 +1023,65 @@ window, a command that leaves the leader's line alone."
   "Send one wheel notch of DIRECTION over WINDOW."
   (let ((position (list window (window-start window) '(0 . 0) 0)))
     (execute-kbd-macro (vector (list direction position 1)))))
+
+(defvar align-buffer-fuzz-columns 4
+  "How many columns the next resize of the walk moves the divider by.")
+
+(defconst align-buffer-fuzz--least-columns 24
+  "A pane is left this many columns wide, and is not narrowed below it.")
+
+(defun align-buffer-fuzz-widen-pane ()
+  "Make the window point is in wider."
+  (interactive)
+  (enlarge-window-horizontally align-buffer-fuzz-columns))
+
+(defun align-buffer-fuzz-narrow-pane ()
+  "Make the window point is in narrower."
+  (interactive)
+  (shrink-window-horizontally align-buffer-fuzz-columns))
+
+(defun align-buffer-fuzz--beside (window)
+  "Return the pane facing WINDOW, which is the other window of its frame."
+  (car (delq window (window-list (window-frame window) 'no-minibuffer))))
+
+(defun align-buffer-fuzz--columns (window grow)
+  "Return how many columns to resize WINDOW by, widening it when GROW.
+Nil where the pane that would give up the columns has none to spare.
+
+The draw is made whether or not the resize happens, so that the walk follows
+from the seed and not from how wide the panes happen to stand."
+  (let* ((columns (align-buffer-fuzz--between 1 8))
+         (beside (align-buffer-fuzz--beside window))
+         (giving (if grow beside window))
+         (room (and (window-live-p beside)
+                    (- (window-body-width giving)
+                       align-buffer-fuzz--least-columns))))
+    (when (and room (> room 0))
+      (min room columns))))
+
+(defun align-buffer-fuzz--resize (grow presses)
+  "Press the key resizing the pane the reader is in PRESSES times.
+GROW says it widens the pane rather than narrows it.  Return what to call the
+step, and refuse the step where neither pane has a column to spare.
+
+What a repeating key gives: each press is a size change of its own, so the
+measure a size change asks for falls between two presses while more resizing
+is still on its way."
+  (let ((taken 0))
+    (dotimes (_ presses)
+      (when-let ((columns (align-buffer-fuzz--columns (selected-window) grow)))
+        (setq align-buffer-fuzz-columns columns)
+        (execute-kbd-macro (kbd (if grow "C-c w" "C-c s")))
+        (setq taken (+ taken columns))
+        (when (> presses 1)
+          ;; Between the presses, so the hook sees each size change and what
+          ;; it queues runs while the next press is still to come.
+          (redisplay t)
+          (sit-for 0.01))))
+    (when (zerop taken)
+      (user-error "No pane with a column to spare"))
+    (format "%s the pane by %s column(s), %s press(es)"
+            (if grow "widen" "narrow") taken presses)))
 
 (defun align-buffer-fuzz--move (move)
   "Take one MOVE in SESSION and return what to call it.
@@ -1052,6 +1117,12 @@ a jump to a line and a recenter - ask for the placement themselves."
               1 (align-buffer-fuzz--lines (window-buffer window))))
        (execute-kbd-macro (kbd "C-c g"))
        (format "jump to line %s" align-buffer-fuzz-line))
+      ('wider (align-buffer-fuzz--resize t 1))
+      ('narrower (align-buffer-fuzz--resize nil 1))
+      ('wider-held (align-buffer-fuzz--resize
+                    t (align-buffer-fuzz--between 2 5)))
+      ('narrower-held (align-buffer-fuzz--resize
+                       nil (align-buffer-fuzz--between 2 5)))
       ('lead
        ;; Through the command, since selecting a window from Lisp asks for no
        ;; placement and would leave the new follower wherever it last stood.
