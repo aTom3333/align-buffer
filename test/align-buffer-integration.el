@@ -466,21 +466,31 @@ a line the reader has read past far enough for it to have left the top."
 (align-buffer-integration-defscenario a-transient-window-does-not-lead
   (let ((session (align-buffer-integration--session)))
     (align-buffer-integration--go session 'left 40)
-    ;; Only the follower is asserted on.  Splitting the leader halves its
-    ;; height, and redisplay rescrolling a window whose point no longer clears
-    ;; the margin is correct behaviour rather than something to catch.
+    ;; Splitting the leader halves its height, and redisplay rescrolling a
+    ;; window whose point no longer clears the margin is correct behaviour
+    ;; rather than something to catch - the follower follows it there.  What
+    ;; the window split off must not do is lead: it shows the leader's buffer
+    ;; with a start of the leader's and a height of its own, and a follower
+    ;; placed from it stands beside a view nobody is reading.
     (let ((before (align-buffer-integration--start session 'right))
 	  (elsewhere (align-buffer-integration--buffer "elsewhere" 20)))
       (let ((window (split-window (selected-window) nil 'below)))
 	(set-window-buffer window (window-buffer (selected-window)))
 	(align-buffer-integration--settle)
+	(align-buffer-integration--expect
+	 'a-transient-window-does-not-lead "the follower was not dragged"
+	 before (align-buffer-integration--start session 'right))
 	(set-window-buffer window elsewhere)
 	(align-buffer-integration--settle)
 	(when (window-live-p window) (delete-window window)))
       (align-buffer-integration--settle)
       (align-buffer-integration--expect
-       'a-transient-window-does-not-lead "the follower was not dragged"
-       before (align-buffer-integration--start session 'right))
+       'a-transient-window-does-not-lead "the panes are level with each other"
+       t (align-buffer-integration--level-p session))
+      (align-buffer-integration--expect
+       'a-transient-window-does-not-lead "and level on the leader's own view"
+       (align-buffer-integration--start session 'left)
+       (align-buffer-integration--start session 'right))
       (kill-buffer elsewhere))
     (align-buffer-quit session)))
 
@@ -699,6 +709,32 @@ a line the reader has read past far enough for it to have left the top."
      "and as tall as the run is drawn at the new width"
      (align-buffer-integration--run-height facing 50 3)
      (align-buffer-pad-height window pad))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario a-widened-pane-is-levelled-again
+  ;; No pads here: a window of another width wraps its own lines into another
+  ;; number of rows, so the line the pair speaks for is drawn somewhere else
+  ;; and the facing pane has to be placed again.  The reader widens the pane
+  ;; they stand in with a repeating key, which gives one size change per press.
+  (let* ((session (align-buffer-integration--session))
+         (window (get-buffer-window (align-buffer-session-left-buffer session))))
+    ;; Four lines of the left wrap, in the view and above the pair, so their
+    ;; height is what the widening changes.
+    (align-buffer-integration--wrap session 'left 52 4)
+    (align-buffer-integration--view session 'left 50 60)
+    (align-buffer-integration--expect
+     'a-widened-pane-is-levelled-again "level before the pane is resized"
+     t (align-buffer-integration--level-p session))
+    (with-selected-window window
+      (dotimes (_ 4)
+        (enlarge-window-horizontally 3)
+        ;; A press at a time, each one a size change of its own, with the
+        ;; redisplay that runs the hook between them.
+        (redisplay t)))
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'a-widened-pane-is-levelled-again "and level once it has been widened"
+     t (align-buffer-integration--level-p session))
     (align-buffer-quit session)))
 
 (align-buffer-integration-defscenario marked-stretches-are-moved-between

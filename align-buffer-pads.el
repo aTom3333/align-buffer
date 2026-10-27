@@ -1406,16 +1406,22 @@ pad that stands for them, and they are ours to keep level."
 
 
 
-;;; Measuring the pads again
+;;; Answering a window that changes size
 
-;; A pad's rows are the display of the facing side's lines, measured in the
-;; window drawing them.  A window that changes width wraps those lines into
-;; another number of rows, so the measurement has to be taken again: until it
-;; is, the pad stands as tall as the run used to be drawn and the two panes
-;; read that much apart.
+;; A window of another width wraps its lines into another number of rows, so
+;; every line below the first wrapped one is drawn somewhere else and the two
+;; panes no longer read level.  A pad is the sharper case of the same thing:
+;; its rows are the display of the facing side's lines, measured in the window
+;; drawing them, so until that measurement is taken again the pad stands as
+;; tall as the run used to be drawn.  A size change therefore measures the
+;; pads and places the panes level afresh, and it places them whether or not a
+;; pad came out at another height.
+;;
+;; Both halves live here because this is the layer that has them: the pads to
+;; measure, and the two answers a placement can take.
 
-(defvar align-buffer--measure-timer nil
-  "Timer set to measure the pads again once redisplay is over.")
+(defvar align-buffer--resize-timer nil
+  "Timer set to answer a size change once redisplay is over.")
 
 (defun align-buffer-pad-lines (overlay)
   "Return how many lines of the facing side OVERLAY's pad stands for.
@@ -1465,10 +1471,10 @@ Return non-nil when any of them came out other than it stood."
               (setq changed t)))
           changed)))))
 
-(defun align-buffer--pads-level-again (session)
-  "Place SESSION's panes again, its pads having changed height.
+(defun align-buffer--level-again (session)
+  "Place SESSION's panes level again, as its windows are drawn now.
 Led by the window the reader stands in, whose view is the one to keep: what a
-pad of another height moves is the pane facing it."
+line drawn at another height moves is the pane facing it."
   (let* ((windows (delq nil (mapcar
                              (lambda (side)
                                (get-buffer-window
@@ -1482,46 +1488,50 @@ pad of another height moves is the pane facing it."
     (mapc #'align-buffer-forget-placement windows)
     (when (window-live-p leader)
       (with-current-buffer (window-buffer leader)
-        ;; The same two answers as a scroll of the reader's: the row of a pad
-        ;; being read is what the facing pane comes level with, and a line of
-        ;; their own is what the pairs speak for.
+        ;; The same answers as a scroll of the reader's: the row of a pad being
+        ;; read is what the facing pane comes level with, a run of the facing
+        ;; side's speaks for the view where point is inside one, and a line of
+        ;; the reader's own is what the pairs speak for.
         (if align-buffer--walked
             (align-buffer--pad-face-row leader (car align-buffer--walked)
                                         (cdr align-buffer--walked))
-          (align-buffer--face-run leader))))))
+          ;; `align-buffer--face-run' places the pane where such a run speaks
+          ;; and takes no placement at all otherwise, leaving that to the
+          ;; ordinary one, which a scroll gets from the hook that heard it and
+          ;; a size change has to ask for here.  A run it has just left is
+          ;; placed by the sync of its own that it makes.
+          (let ((held align-buffer-inhibit-sync))
+            (align-buffer--face-run leader)
+            (unless (or held align-buffer-inhibit-sync)
+              (align-buffer-sync leader))))))))
 
-(defun align-buffer--measure-pads ()
-  "Measure every session's pads again, and level the panes of those that moved."
-  (when align-buffer--measure-timer
-    (cancel-timer align-buffer--measure-timer)
-    (setq align-buffer--measure-timer nil))
+(defun align-buffer--measure-and-level ()
+  "Measure every session's pads again, and place its panes level afresh."
+  (when align-buffer--resize-timer
+    (cancel-timer align-buffer--resize-timer)
+    (setq align-buffer--resize-timer nil))
   (dolist (session align-buffer--sessions)
     (when (align-buffer-session-live-p session)
-      (let ((changed nil))
-        (dolist (side '(left right))
-          (when (align-buffer--measure-pads-in
-                 (align-buffer-buffer session side))
-            (setq changed t)))
-        (when changed
-          (align-buffer--pads-level-again session))))))
+      (dolist (side '(left right))
+        (align-buffer--measure-pads-in (align-buffer-buffer session side)))
+      (align-buffer--level-again session))))
 
-(defun align-buffer--pads-width-changed (frame)
-  "Have the pads shown in FRAME measured again, once redisplay is over.
-
-Queued on a timer rather than measured here: this runs from redisplay, and a
-window placed from inside redisplay is put back by the pass that follows."
+(defun align-buffer--size-changed (frame)
+  "Have the panes shown in FRAME measured and placed level again.
+Once redisplay is over: this runs from inside it, and a window placed from
+there is put back by the pass that follows."
   ;; Errors demoted: Emacs REMOVES a hook function that signals, so one error
-  ;; would leave every later width change unmeasured.
-  (with-demoted-errors "align-buffer pad measure: %S"
+  ;; would leave every later size change unanswered.
+  (with-demoted-errors "align-buffer resize: %S"
     (when (and (frame-live-p frame)
                (seq-some (lambda (window)
-                           (align-buffer--pads-in-p (window-buffer window)))
+                           (align-buffer-session-for (window-buffer window)))
                          (window-list frame 'no-minibuffer))
-               (not align-buffer--measure-timer))
-      (setq align-buffer--measure-timer
-            (run-with-timer 0 nil #'align-buffer--measure-pads)))))
+               (not align-buffer--resize-timer))
+      (setq align-buffer--resize-timer
+            (run-with-timer 0 nil #'align-buffer--measure-and-level)))))
 
-(add-hook 'window-size-change-functions #'align-buffer--pads-width-changed)
+(add-hook 'window-size-change-functions #'align-buffer--size-changed)
 
 
 (provide 'align-buffer-pads)

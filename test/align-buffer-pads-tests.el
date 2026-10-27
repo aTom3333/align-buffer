@@ -534,7 +534,7 @@ measuring a line from there takes in the line after it as well."
       (should (= (point) (line-end-position)))
       (should (= (line-number-at-pos (point)) 2)))))
 
-;;; Measuring the pads again
+;;; Answering a window that changes size
 
 (defun align-buffer-pads-tests--facing-rows (facing facing-line lines)
   "Return how many rows LINES lines of FACING from FACING-LINE are drawn as."
@@ -558,11 +558,11 @@ The left stands a pad of two rows in front of its own second line for them."
 put back by the pass that follows."
   (align-buffer-pads-tests--with-wrapping-session
     (adjust-window-trailing-edge (get-buffer-window left) -20 t)
-    (align-buffer--pads-width-changed (selected-frame))
-    (should align-buffer--measure-timer)
+    (align-buffer--size-changed (selected-frame))
+    (should align-buffer--resize-timer)
     (should (equal (align-buffer-pad-rows pad) 2))
-    (align-buffer--measure-pads)
-    (should-not align-buffer--measure-timer)))
+    (align-buffer--measure-and-level)
+    (should-not align-buffer--resize-timer)))
 
 (ert-deftest align-buffer-pads-test-a-pad-is-measured-again-at-a-new-width ()
   "A pad stands as many rows as the facing run is drawn as at the width it has.
@@ -572,12 +572,12 @@ measured against it again."
     (should (equal (align-buffer-pad-rows pad)
                    (align-buffer-pads-tests--facing-rows right 2 2)))
     (adjust-window-trailing-edge (get-buffer-window left) -20 t)
-    (align-buffer--measure-pads)
+    (align-buffer--measure-and-level)
     (should (equal (align-buffer-pad-rows pad)
                    (align-buffer-pads-tests--facing-rows right 2 2)))
     ;; And back to a width it has already been measured at.
     (adjust-window-trailing-edge (get-buffer-window left) 20 t)
-    (align-buffer--measure-pads)
+    (align-buffer--measure-and-level)
     (should (equal (align-buffer-pad-rows pad)
                    (align-buffer-pads-tests--facing-rows right 2 2)))))
 
@@ -586,7 +586,7 @@ measured against it again."
 and each line of the run the row its own text faces."
   (align-buffer-pads-tests--with-wrapping-session
     (adjust-window-trailing-edge (get-buffer-window left) -20 t)
-    (align-buffer--measure-pads)
+    (align-buffer--measure-and-level)
     (let ((rows (car (overlay-get pad 'align-buffer-pad-run))))
       (should (equal (length rows) (align-buffer-pad-rows pad)))
       (should (equal (aref rows 0) 2))
@@ -604,10 +604,24 @@ again, and the last row where the run has lost the one it was on."
       (line-move 1 t)
       (should (equal (cdr align-buffer--walked) 1))
       (adjust-window-trailing-edge (get-buffer-window left) -20 t)
-      (align-buffer--measure-pads)
+      (align-buffer--measure-and-level)
       (should (equal (car align-buffer--walked) pad))
       (should (equal (cdr align-buffer--walked) 1))
       (should (< (cdr align-buffer--walked) (align-buffer-pad-rows pad))))))
+
+(ert-deftest align-buffer-pads-test-a-width-change-is-answered-without-a-pad ()
+  "A session with no pads in it answers a width change as well.
+Lines long enough to wrap are drawn as another number of rows at another
+width, which moves every line below the first of them."
+  (align-buffer-pads-tests--with-session
+      "one\ntwo\n"
+      (concat "one\n" (make-string 100 ?x) "\ntwo\n")
+      '((1 . 1) (2 . 3))
+    (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+    (align-buffer--size-changed (selected-frame))
+    (should align-buffer--resize-timer)
+    (align-buffer--measure-and-level)
+    (should-not align-buffer--resize-timer)))
 
 (ert-deftest align-buffer-pads-test-a-pad-with-no-facing-window-stands ()
   "A pad whose facing side is shown nowhere keeps the rows it was given.
@@ -615,7 +629,7 @@ Nothing says how wide those lines wrap, so a measure of none is no answer."
   (align-buffer-pads-tests--with-wrapping-session
     (adjust-window-trailing-edge (get-buffer-window left) -20 t)
     (delete-window (get-buffer-window right))
-    (align-buffer--measure-pads)
+    (align-buffer--measure-and-level)
     (should (equal (align-buffer-pad-rows pad) 2))))
 
 (provide 'align-buffer-pads-tests)
