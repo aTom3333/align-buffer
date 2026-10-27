@@ -534,5 +534,89 @@ measuring a line from there takes in the line after it as well."
       (should (= (point) (line-end-position)))
       (should (= (line-number-at-pos (point)) 2)))))
 
+;;; Measuring the pads again
+
+(defun align-buffer-pads-tests--facing-rows (facing facing-line lines)
+  "Return how many rows LINES lines of FACING from FACING-LINE are drawn as."
+  (length (car (align-buffer--pad-run-rows facing facing-line lines))))
+
+(defmacro align-buffer-pads-tests--with-wrapping-session (&rest body)
+  "Run BODY over a session whose right side has two lines long enough to wrap.
+The left stands a pad of two rows in front of its own second line for them."
+  (declare (indent 0))
+  `(align-buffer-pads-tests--with-session
+       "one\ntwo\n"
+       ,(concat "one\n" (make-string 100 ?x) "\n" (make-string 100 ?y)
+                "\ntwo\n")
+       '((1 . 1) (2 . 4))
+     (let ((pad (align-buffer-pads-tests--pad left 2 2 right 2)))
+       ,@body)))
+
+(ert-deftest align-buffer-pads-test-a-width-change-is-measured-off-redisplay ()
+  "A width change queues the measure instead of taking it there and then.
+`window-size-change-functions' runs from redisplay, where a window we place is
+put back by the pass that follows."
+  (align-buffer-pads-tests--with-wrapping-session
+    (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+    (align-buffer--pads-width-changed (selected-frame))
+    (should align-buffer--measure-timer)
+    (should (equal (align-buffer-pad-rows pad) 2))
+    (align-buffer--measure-pads)
+    (should-not align-buffer--measure-timer)))
+
+(ert-deftest align-buffer-pads-test-a-pad-is-measured-again-at-a-new-width ()
+  "A pad stands as many rows as the facing run is drawn as at the width it has.
+The run wraps differently once the facing window changes width, and the pad is
+measured against it again."
+  (align-buffer-pads-tests--with-wrapping-session
+    (should (equal (align-buffer-pad-rows pad)
+                   (align-buffer-pads-tests--facing-rows right 2 2)))
+    (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+    (align-buffer--measure-pads)
+    (should (equal (align-buffer-pad-rows pad)
+                   (align-buffer-pads-tests--facing-rows right 2 2)))
+    ;; And back to a width it has already been measured at.
+    (adjust-window-trailing-edge (get-buffer-window left) 20 t)
+    (align-buffer--measure-pads)
+    (should (equal (align-buffer-pad-rows pad)
+                   (align-buffer-pads-tests--facing-rows right 2 2)))))
+
+(ert-deftest align-buffer-pads-test-a-measured-pad-has-a-row-for-each-line ()
+  "Each row of a pad measured again says which line of the run it stands for,
+and each line of the run the row its own text faces."
+  (align-buffer-pads-tests--with-wrapping-session
+    (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+    (align-buffer--measure-pads)
+    (let ((rows (car (overlay-get pad 'align-buffer-pad-run))))
+      (should (equal (length rows) (align-buffer-pad-rows pad)))
+      (should (equal (aref rows 0) 2))
+      (should (equal (aref rows (1- (length rows))) 3))
+      (should (equal (align-buffer-pad-text-row pad 2) 0))
+      (should (equal (align-buffer-pad-lines pad) 2)))))
+
+(ert-deftest align-buffer-pads-test-a-measured-pad-keeps-the-row-walked ()
+  "The row a pad is being walked at is still the cursor's once it is measured
+again, and the last row where the run has lost the one it was on."
+  (align-buffer-pads-tests--with-wrapping-session
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 1))
+      (line-move 1 t)
+      (line-move 1 t)
+      (should (equal (cdr align-buffer--walked) 1))
+      (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+      (align-buffer--measure-pads)
+      (should (equal (car align-buffer--walked) pad))
+      (should (equal (cdr align-buffer--walked) 1))
+      (should (< (cdr align-buffer--walked) (align-buffer-pad-rows pad))))))
+
+(ert-deftest align-buffer-pads-test-a-pad-with-no-facing-window-stands ()
+  "A pad whose facing side is shown nowhere keeps the rows it was given.
+Nothing says how wide those lines wrap, so a measure of none is no answer."
+  (align-buffer-pads-tests--with-wrapping-session
+    (adjust-window-trailing-edge (get-buffer-window left) -20 t)
+    (delete-window (get-buffer-window right))
+    (align-buffer--measure-pads)
+    (should (equal (align-buffer-pad-rows pad) 2))))
+
 (provide 'align-buffer-pads-tests)
 ;;; align-buffer-pads-tests.el ends here

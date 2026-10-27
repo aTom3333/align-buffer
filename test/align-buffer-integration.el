@@ -249,6 +249,27 @@ a line the reader has read past far enough for it to have left the top."
          (window (get-buffer-window buffer)))
     (< (align-buffer-line-position buffer line) (window-start window))))
 
+(defun align-buffer-integration--run-height (window first count)
+  "Return how tall WINDOW draws COUNT lines of its buffer from FIRST, in pixels."
+  (let ((buffer (window-buffer window)))
+    (apply #'+ (mapcar (lambda (line)
+                         (align-buffer-line-display-height
+                          window (align-buffer-line-position buffer line)))
+                       (number-sequence first (+ first count -1))))))
+
+(defun align-buffer-integration--wrap (session side first count)
+  "Make COUNT lines of SESSION's SIDE buffer from FIRST wrap in their window."
+  (let* ((window (get-buffer-window (align-buffer-buffer session side)))
+         (buffer (window-buffer window)))
+    (with-current-buffer buffer
+      (setq-local truncate-lines nil)
+      (save-excursion
+        (dolist (line (number-sequence first (+ first count -1)))
+          (goto-char (align-buffer-line-position buffer line))
+          (end-of-line)
+          (insert (make-string (* 2 (window-body-width window)) ?x))))
+      (set-buffer-modified-p nil))))
+
 (defun align-buffer-integration--go (session side line)
   "Select SESSION's SIDE window and put point on LINE there, as a command would."
   (let ((window (get-buffer-window (align-buffer-buffer session side))))
@@ -644,6 +665,40 @@ a line the reader has read past far enough for it to have left the top."
      (let ((was (align-buffer--pad-top window pad)))
        (redisplay t)
        (= was (align-buffer--pad-top window pad))))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario a-divider-drag-measures-the-pads-again
+  ;; A pad's rows are the display of the facing side's lines, so a facing
+  ;; window of another width wraps that run into another number of rows and
+  ;; the pad has to be measured against it again.  The reader dragging the
+  ;; divider is what asks for it, and the measure is taken off redisplay.
+  (let* ((session (align-buffer-integration--session))
+         (left (align-buffer-session-left-buffer session))
+         (window (get-buffer-window left))
+         (facing (align-buffer--follower session 'left))
+         (pad nil))
+    ;; Three lines of the right wide enough to wrap, which the left stands a
+    ;; pad in front of its line 50 for.
+    (align-buffer-integration--wrap session 'right 50 3)
+    (setq pad (align-buffer-pad-add
+               left (align-buffer-line-position left 50) 3
+               'font-lock-string-face
+               (align-buffer-session-right-buffer session) 50))
+    (align-buffer-integration--view session 'left 40 45)
+    (align-buffer-integration--expect
+     'a-divider-drag-measures-the-pads-again
+     "the pad stands as tall as the run it was measured against"
+     (align-buffer-integration--run-height facing 50 3)
+     (align-buffer-pad-height window pad))
+    ;; The drag itself, which leaves the facing pane wrapping its lines
+    ;; somewhere else.
+    (adjust-window-trailing-edge window -20 t)
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'a-divider-drag-measures-the-pads-again
+     "and as tall as the run is drawn at the new width"
+     (align-buffer-integration--run-height facing 50 3)
+     (align-buffer-pad-height window pad))
     (align-buffer-quit session)))
 
 (align-buffer-integration-defscenario marked-stretches-are-moved-between

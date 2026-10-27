@@ -1406,5 +1406,123 @@ pad that stands for them, and they are ours to keep level."
 
 
 
+;;; Measuring the pads again
+
+;; A pad's rows are the display of the facing side's lines, measured in the
+;; window drawing them.  A window that changes width wraps those lines into
+;; another number of rows, so the measurement has to be taken again: until it
+;; is, the pad stands as tall as the run used to be drawn and the two panes
+;; read that much apart.
+
+(defvar align-buffer--measure-timer nil
+  "Timer set to measure the pads again once redisplay is over.")
+
+(defun align-buffer-pad-lines (overlay)
+  "Return how many lines of the facing side OVERLAY's pad stands for.
+Its rows say how many screen rows those lines are drawn as over there, which
+is as many or more."
+  (let ((run (overlay-get overlay 'align-buffer-pad-run)))
+    (if run
+        (length (cdr run))
+      (align-buffer-pad-rows overlay))))
+
+(defun align-buffer--pad-measure-again (overlay)
+  "Measure OVERLAY's pad against the facing side as it is drawn now.
+Return non-nil when it came out other than the pad stands."
+  (let* ((facing (overlay-get overlay 'align-buffer-pad-facing))
+         (facing-line (overlay-get overlay 'align-buffer-pad-facing-line))
+         (was (overlay-get overlay 'align-buffer-pad-run))
+         (run (align-buffer--pad-run-rows facing facing-line
+                                          (align-buffer-pad-lines overlay))))
+    ;; Nil where those lines are drawn nowhere to be measured, and the pad
+    ;; keeps the rows it has: a window the reader has put away says nothing
+    ;; about how wide the lines wrap in a window that is still up.
+    (when (and run (not (equal run was)))
+      (let ((rows (length (car run))))
+        (overlay-put overlay 'align-buffer-pad-run run)
+        (overlay-put overlay 'align-buffer-pad-rows rows)
+        (with-current-buffer (overlay-buffer overlay)
+          ;; Drawn afresh at the new count, which is also what puts the cursor
+          ;; back on the row being walked - on the last row where the run has
+          ;; lost the one it was on.
+          (let ((row (when (eq (car-safe align-buffer--walked) overlay)
+                       (min (cdr align-buffer--walked) (1- rows)))))
+            (when row (setcdr align-buffer--walked row))
+            (align-buffer--pad-show-cursor overlay row)))
+        t))))
+
+(defun align-buffer--measure-pads-in (buffer)
+  "Measure BUFFER's pads against the facing side as it is drawn now.
+Return non-nil when any of them came out other than it stood."
+  (when (align-buffer--pads-in-p buffer)
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (let ((changed nil))
+          (dolist (overlay (overlays-in (point-min) (point-max)))
+            (when (and (overlay-get overlay 'align-buffer-pad-rows)
+                       (align-buffer--pad-measure-again overlay))
+              (setq changed t)))
+          changed)))))
+
+(defun align-buffer--pads-level-again (session)
+  "Place SESSION's panes again, its pads having changed height.
+Led by the window the reader stands in, whose view is the one to keep: what a
+pad of another height moves is the pane facing it."
+  (let* ((windows (delq nil (mapcar
+                             (lambda (side)
+                               (get-buffer-window
+                                (align-buffer-buffer session side)))
+                             '(left right))))
+         (leader (if (memq (selected-window) windows)
+                     (selected-window)
+                   (car windows))))
+    ;; The placements are noted as they were taken, so a pad of another height
+    ;; leaves them saying the panes are level when they are not.
+    (mapc #'align-buffer-forget-placement windows)
+    (when (window-live-p leader)
+      (with-current-buffer (window-buffer leader)
+        ;; The same two answers as a scroll of the reader's: the row of a pad
+        ;; being read is what the facing pane comes level with, and a line of
+        ;; their own is what the pairs speak for.
+        (if align-buffer--walked
+            (align-buffer--pad-face-row leader (car align-buffer--walked)
+                                        (cdr align-buffer--walked))
+          (align-buffer--face-run leader))))))
+
+(defun align-buffer--measure-pads ()
+  "Measure every session's pads again, and level the panes of those that moved."
+  (when align-buffer--measure-timer
+    (cancel-timer align-buffer--measure-timer)
+    (setq align-buffer--measure-timer nil))
+  (dolist (session align-buffer--sessions)
+    (when (align-buffer-session-live-p session)
+      (let ((changed nil))
+        (dolist (side '(left right))
+          (when (align-buffer--measure-pads-in
+                 (align-buffer-buffer session side))
+            (setq changed t)))
+        (when changed
+          (align-buffer--pads-level-again session))))))
+
+(defun align-buffer--pads-width-changed (frame)
+  "Have the pads shown in FRAME measured again, once redisplay is over.
+
+Queued on a timer rather than measured here: this runs from redisplay, and a
+window placed from inside redisplay is put back by the pass that follows."
+  ;; Errors demoted: Emacs REMOVES a hook function that signals, so one error
+  ;; would leave every later width change unmeasured.
+  (with-demoted-errors "align-buffer pad measure: %S"
+    (when (and (frame-live-p frame)
+               (seq-some (lambda (window)
+                           (align-buffer--pads-in-p (window-buffer window)))
+                         (window-list frame 'no-minibuffer))
+               (not align-buffer--measure-timer))
+      (setq align-buffer--measure-timer
+            (run-with-timer 0 nil #'align-buffer--measure-pads)))))
+
+(add-hook 'window-size-change-functions #'align-buffer--pads-width-changed)
+
+
 (provide 'align-buffer-pads)
 ;;; align-buffer-pads.el ends here
