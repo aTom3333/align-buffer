@@ -158,13 +158,13 @@ window can be scrolled."
    window (* rows (align-buffer--row-height window))))
 
 (defun align-buffer--centre-target (window position rows)
-  "Return where POSITION is levelled to for ROWS rows of it to read centred.
-What hangs in front of POSITION is drawn above its own text, so the levelling
-aims that much higher and the text lands on the centre.  Not above the
-window's top, where what hangs is taller than the centre and the window is
-held against it instead."
-  (max 0 (- (align-buffer--centre-pixels window rows)
-            (align-buffer--hanging-height window position))))
+  "Return where POSITION is drawn for ROWS rows of it to read centred.
+The centre, and no nearer the top than what hangs in front of POSITION is
+tall: those rows are drawn above its own text, so a text drawn higher than
+they reach would have the window lifted into them, and it is held against
+them instead."
+  (max (align-buffer--centre-pixels window rows)
+       (align-buffer--hanging-height window position)))
 
 (defun align-buffer--centre-at (window position pixels)
   "Scroll WINDOW so that POSITION is drawn PIXELS below its top.
@@ -173,9 +173,17 @@ Two steps, because a start is a position and the rows an overlay hangs hold
 none: recentring gets the window as near as a row boundary allows, which is
 where there is something to measure at all, and the rest of the way is a
 scroll through whatever is drawn there - a block of rows included, which no
-start of its own could land inside."
+start of its own could land inside.
+
+The two count from different places.  `recenter' counts the rows the line is
+drawn as, the first of them being the first of whatever hangs in front of its
+text, and PIXELS says where that text goes; so the recentring is asked for
+what hangs higher up, and the scroll after it reads the same place as the
+caller does."
   (with-selected-window window
-    (recenter (/ pixels (align-buffer--row-height window)))
+    (let ((hanging (align-buffer--hanging-height window position)))
+      (recenter (/ (max 0 (- pixels hanging))
+                   (align-buffer--row-height window))))
     (align-buffer--level-exactly window position pixels)))
 
 (defun align-buffer--goto-section (session side section)
