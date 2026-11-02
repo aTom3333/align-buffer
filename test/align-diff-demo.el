@@ -92,6 +92,17 @@ taller than the window can be read off the screen."
              "")
     (filler 6)
     (same ""
+          "// A run that begins right after a blank line, so the pane without"
+          "// it hangs the rows on a line that has no text of its own."
+          "")
+    (added "double Trimmed(const Samples& samples, double share) {"
+           "  const auto sorted = samples.Sorted();"
+           "  const auto drop = sorted.Size() * share;"
+           "  return Mean(sorted.Middle(drop));"
+           "}"
+           "")
+    (filler 6)
+    (same ""
           "// A big run the new side alone has, better than half a screenful of"
           "// it, so the old pane stands a block of blank rows against it.")
     (added "class WeightedWindow {"

@@ -886,8 +886,9 @@ stops the walk where no refusal comes, and defaults to eight."
 
 (defun align-diff-integration--demo ()
   "Return a session over the demo's own diff, with the section keys bound.
-Thirteen hunks, two of them runs taller than a window, and a changed line
-whose two versions wrap to a different number of rows."
+Fourteen hunks, two of them runs taller than a window, one beginning right
+after a blank line, and a changed line whose two versions wrap to a different
+number of rows."
   (setq align-diff-gap-marker 'pad)
   (setq align-diff-idle-delay nil)
   (let ((session (align-diff-demo)))

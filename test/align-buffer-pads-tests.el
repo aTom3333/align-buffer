@@ -303,22 +303,38 @@ and any command at all that moves point ends the walk, named or not."
 ;;; Where rows hang when the line before them is empty
 
 (ert-deftest align-buffer-pads-test-rows-hang-after-an-empty-line ()
-  "Rows whose line before is empty hang where they belong in front of instead.
-
-They are drawn in front of the position they hang at, so the end of the line
-before is exactly right while that line has text: the rows come after it.  An
-empty line's end is its own beginning, and rows hung there are drawn in front
-of the line itself - so that line is drawn a pad's height below its pair while
-everything above and below it is level."
+  "Rows whose line before is empty stand in the place of that line's newline.
+Drawn in front of it they would be drawn in front of the line, its end being
+its own beginning, and the line would carry the last of the rows instead of
+its own.  Standing in the newline's place they come after the row that
+newline closes, which is the line itself."
   (align-buffer-pads-tests--with-session "one\n\nthree\nfour\n"
       "one\n\na\nb\nthree\nfour\n"
       '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
     (let ((overlay (align-buffer-pads-tests--pad left 3 2 right 3)))
       (should (= (overlay-start overlay)
-                 (align-buffer-line-position left 3)))
-      ;; Which is the shape the rows above the first line of a buffer have,
-      ;; and what tells the drawing it needs no newline to open them.
-      (should (= (overlay-start overlay) (align-buffer-pad-anchor overlay))))))
+                 (align-buffer-line-position left 2)))
+      (should-not (= (overlay-start overlay)
+                     (align-buffer-pad-anchor overlay)))
+      (should (null (overlay-get overlay 'before-string)))
+      ;; The row of the line itself, the two of the pad, and a newline of
+      ;; their own closing the last of them: the one the text has is the one
+      ;; they are drawn in the place of.
+      (should (equal (overlay-get overlay 'display) "\n \n \n"))
+      (should (eq (align-buffer-pad-at (align-buffer-line-position left 3)
+                                       left)
+                  overlay)))))
+
+(ert-deftest align-buffer-pads-test-a-pad-after-an-empty-line-is-walked-into ()
+  "A step down from an empty line reaches the rows hanging on it."
+  (align-buffer-pads-tests--with-session "one\n\nthree\nfour\n"
+      "one\n\na\nb\nthree\nfour\n"
+      '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
+    (let ((overlay (align-buffer-pads-tests--pad left 3 2 right 3)))
+      (with-selected-window (get-buffer-window left)
+        (goto-char (align-buffer-line-position left 2))
+        (call-interactively #'next-line)
+        (should (equal align-buffer--walked (cons overlay 0)))))))
 
 (ert-deftest align-buffer-pads-test-rows-hang-after-a-line-with-text ()
   "Rows whose line before has text hang at the end of it, where they come after."

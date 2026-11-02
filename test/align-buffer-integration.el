@@ -270,6 +270,15 @@ a line the reader has read past far enough for it to have left the top."
           (insert (make-string (* 2 (window-body-width window)) ?x))))
       (set-buffer-modified-p nil))))
 
+(defun align-buffer-integration--blank (session side line)
+  "Take the text off LINE of SESSION's SIDE buffer, leaving an empty line."
+  (let ((buffer (align-buffer-buffer session side)))
+    (with-current-buffer buffer
+      (save-excursion
+        (goto-char (align-buffer-line-position buffer line))
+        (delete-region (point) (line-end-position)))
+      (set-buffer-modified-p nil))))
+
 (defun align-buffer-integration--go (session side line)
   "Select SESSION's SIDE window and put point on LINE there, as a command would."
   (let ((window (get-buffer-window (align-buffer-buffer session side))))
@@ -675,6 +684,105 @@ a line the reader has read past far enough for it to have left the top."
      (let ((was (align-buffer--pad-top window pad)))
        (redisplay t)
        (= was (align-buffer--pad-top window pad))))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario rows-after-an-empty-line-belong-to-it
+  ;; A pad hangs on the line before the one its rows stand in front of, so the
+  ;; rows are part of that line's display and every line keeps its own number
+  ;; beside its own text.  An empty line has nothing for them to come after, so
+  ;; they stand in the place of its newline: the line keeps the row it would
+  ;; have had, with the rows below it, and point on it is drawn there.
+  (let* ((session (align-buffer-integration--session))
+         (left (align-buffer-session-left-buffer session))
+         (window (get-buffer-window left))
+         (height (align-buffer--row-height window))
+         (pad nil))
+    (align-buffer-integration--blank session 'left 49)
+    (setq pad (align-buffer-pad-add
+               left (align-buffer-line-position left 50) 4
+               'font-lock-string-face
+               (align-buffer-session-right-buffer session) 50))
+    (align-buffer-integration--view session 'left 40 45)
+    (align-buffer-integration--expect
+     'rows-after-an-empty-line-belong-to-it
+     "the empty line is drawn as its own row and the four of the pad"
+     (* 5 height)
+     (align-buffer-line-display-height
+      window (align-buffer-line-position left 49)))
+    (align-buffer-integration--expect
+     'rows-after-an-empty-line-belong-to-it
+     "and the line they stand in front of as its own text alone"
+     height
+     (align-buffer-line-display-height
+      window (align-buffer-line-position left 50)))
+    (align-buffer-integration--expect
+     'rows-after-an-empty-line-belong-to-it "and the panes reading level"
+     t (align-buffer-integration--level-p session))
+    ;; The empty line is where the reader stands to read the rows, so it is
+    ;; drawn above them rather than below: its own row is the one its number is
+    ;; drawn beside, and point resting on it belongs on that row too.
+    (align-buffer-integration--expect
+     'rows-after-an-empty-line-belong-to-it
+     "the empty line is measured where it is drawn, above its rows"
+     (cdr (posn-x-y (posn-at-point (align-buffer-line-position left 49)
+                                   window)))
+     (align-buffer--offset-in window (align-buffer-line-position left 49)))
+    ;; Begun on the empty line itself, which is a start like any other and the
+    ;; one place the rows are the first thing the window draws.  What the pane
+    ;; is placed by is a span from there, so that span has to come to where the
+    ;; line below the rows is really drawn.
+    (set-window-start window (align-buffer-line-position left 49))
+    (redisplay t)
+    (align-buffer-integration--expect
+     'rows-after-an-empty-line-belong-to-it
+     "the line below the rows is measured where it is drawn"
+     (cdr (posn-x-y (posn-at-point (align-buffer-line-position left 50)
+                                   window)))
+     (align-buffer--offset-in window (align-buffer-line-position left 50)))
+    (align-buffer-quit session)))
+
+(align-buffer-integration-defscenario rows-in-a-newline-s-place-are-measured-again
+  ;; A pad standing in the place of an empty line's newline is measured against
+  ;; the facing side like any other, so a facing window of another width leaves
+  ;; it standing for another number of rows, and it is drawn afresh in the same
+  ;; place with the line keeping its own row above them.
+  (let* ((session (align-buffer-integration--session))
+         (left (align-buffer-session-left-buffer session))
+         (window (get-buffer-window left))
+         (height (align-buffer--row-height window))
+         (facing (align-buffer--follower session 'left))
+         (pad nil))
+    (align-buffer-integration--blank session 'left 49)
+    (align-buffer-integration--wrap session 'right 50 4)
+    (setq pad (align-buffer-pad-add
+               left (align-buffer-line-position left 50) 4
+               'font-lock-string-face
+               (align-buffer-session-right-buffer session) 50))
+    (align-buffer-integration--view session 'left 40 45)
+    (align-buffer-integration--expect
+     'rows-in-a-newline-s-place-are-measured-again
+     "the pad stands as tall as the run it was measured against"
+     (align-buffer-integration--run-height facing 50 4)
+     (align-buffer-pad-height window pad))
+    (adjust-window-trailing-edge window -20 t)
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'rows-in-a-newline-s-place-are-measured-again
+     "and as tall as the run is drawn at the new width"
+     (align-buffer-integration--run-height facing 50 4)
+     (align-buffer-pad-height window pad))
+    (align-buffer-integration--expect
+     'rows-in-a-newline-s-place-are-measured-again
+     "with the empty line drawn as its own row above all of them"
+     (+ height (align-buffer-pad-height window pad))
+     (align-buffer-line-display-height
+      window (align-buffer-line-position left 49)))
+    (align-buffer-integration--expect
+     'rows-in-a-newline-s-place-are-measured-again
+     "and the line they stand in front of as its own text alone"
+     height
+     (align-buffer-line-display-height
+      window (align-buffer-line-position left 50)))
     (align-buffer-quit session)))
 
 (align-buffer-integration-defscenario a-divider-drag-measures-the-pads-again

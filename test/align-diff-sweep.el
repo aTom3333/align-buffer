@@ -623,6 +623,15 @@ away."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer)))
     (select-window window)
+    ;; Arrived from another line where a pad is being read, as a reader always
+    ;; does: point waits on the line the rows hang on for as long as they are
+    ;; walked, so a command going to that very line moves nothing and leaves
+    ;; the reader on the row they were reading.  A line with no text of its
+    ;; own is where that happens, its end being its own beginning.
+    (when (buffer-local-value 'align-buffer--walked buffer)
+      (setq align-diff-sweep-line (if (= line 1) 2 1))
+      (align-diff-sweep--press "C-c C-g")
+      (align-diff-sweep--settle))
     (setq align-diff-sweep-line line)
     (align-diff-sweep--press "C-c C-g")
     (align-diff-sweep--settle)

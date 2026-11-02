@@ -155,6 +155,25 @@ are drawn, and the cursor is asked for on the first of them."
                1 'cursor
                (overlay-get (car align-buffer--walked) 'before-string))))))
 
+(ert-deftest align-buffer-sections-test-a-pad-after-an-empty-line-is-walked-into ()
+  "A section the side shows as rows hanging on an empty line is read in them.
+The reader standing on the line below is in no section of their own, and a pad
+walked is what takes them out of the one they are moving back into: a move that
+left them standing at its boundary would find the same section again on the
+press after this one."
+  (align-buffer-sections-tests--with-session
+      "line 001\n\nline 003\nline 004\n"
+      "line 001\n\nadded one\nadded two\nline 003\nline 004\n"
+      '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
+      '((3 0 3 2))
+    (align-buffer-sections-tests--pad left 3 2 right 3)
+    (with-selected-window (get-buffer-window left)
+      (goto-char (align-buffer-line-position left 4))
+      (align-buffer-previous-section)
+      (should (equal (cdr align-buffer--walked) 0))
+      (should (= (point) (align-buffer-pad-hangs (car align-buffer--walked))))
+      (should (= (line-number-at-pos (point)) 2)))))
+
 (ert-deftest align-buffer-sections-test-without-the-walk-the-line-below-it-is ()
   "The rows are read only where the mode that walks them is on.
 Without it they are display nothing steps through, so the reader goes to the
