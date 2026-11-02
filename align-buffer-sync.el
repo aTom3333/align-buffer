@@ -806,12 +806,13 @@ line point is on in LEADER."
          (line (align-buffer-line-at leader-buffer (window-point leader)))
          (anchor (and line (align-buffer-anchor session side line))))
     (when anchor
-      (let* ((row-height (align-buffer--row-height follower))
-             ;; In pixels, since that is what is being asked for: a count of
-             ;; rows times the height of a default one falls short of the
-             ;; window wherever its lines are drawn taller than that, and the
-             ;; pair would be held that much above where the leader draws it.
-             (room (max 0 (- (window-body-height follower t) row-height)))
+      (let* (;; As far down as the window goes, so the two read level to its
+             ;; bottom edge: a leader drawing the pair in its own last part-row
+             ;; has the follower draw the same part of a row.  In pixels, since
+             ;; that is what is being asked for - a count of rows times the
+             ;; height of a default one falls short of the window wherever its
+             ;; lines are drawn taller than that.
+             (room (max 0 (1- (window-body-height follower t))))
              (other-position (align-buffer-line-position
                               (window-buffer follower) (cdr anchor)))
              ;; Where the pair is drawn in the leader, whether or not point
