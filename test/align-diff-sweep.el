@@ -301,11 +301,43 @@ own text to the top, which is as far as a scroll of ours goes."
          (>= (window-vscroll window t)
              (align-buffer--hanging-height window (window-start window))))))
 
+(defun align-diff-sweep--cursor-pixels (window)
+  "Return how far below WINDOW's top the row it draws its cursor on begins.
+Nil where the display will not say: it answers nothing off a matrix a placement
+has left out of date, so the question is put again behind a redisplay.
+
+Asked of the display itself rather than of the row we asked for the cursor on,
+which is what tells a cursor the reader can see from one we have only
+requested."
+  (nth 2 (or (window-line-height nil window)
+             (progn (redisplay t) (window-line-height nil window)))))
+
+(defun align-diff-sweep--cursor-off-row (window)
+  "Return how far WINDOW's cursor is drawn from the pad row being read, or nil.
+Nil where no row is being read, and where the display will not say where the
+cursor is."
+  (let* ((buffer (window-buffer window))
+         (walked (buffer-local-value 'align-buffer--walked buffer)))
+    (pcase walked
+      (`(,pad . ,row)
+       (let ((drawn (align-diff-sweep--cursor-pixels window))
+             (wanted (+ (align-buffer--pad-top window pad)
+                        (align-buffer--pad-above window pad row))))
+         (and drawn (/= drawn wanted) (- drawn wanted)))))))
+
 (defun align-diff-sweep--check (session side where place)
   "Check what the screen shows of SESSION's SIDE at WHERE, having reached PLACE."
   (let* ((buffer (align-buffer-buffer session side))
          (window (get-buffer-window buffer))
-         (out (align-diff-sweep--out-by session side)))
+         (out (align-diff-sweep--out-by session side))
+         (off (align-diff-sweep--cursor-off-row window)))
+    (when off
+      (align-diff-sweep--note
+       'cursor-off-the-row where place
+       (format "%s px from the row being read, which is row %s drawn at %s px"
+               off
+               (cdr (buffer-local-value 'align-buffer--walked buffer))
+               (align-diff-sweep--cursor-pixels window))))
     (unless (align-diff-sweep--cursor-shown-p window)
       (align-diff-sweep--note 'cursor-off-screen where place
                               (format "start %s lift %s point line %s"

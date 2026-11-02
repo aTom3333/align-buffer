@@ -303,11 +303,10 @@ and any command at all that moves point ends the walk, named or not."
 ;;; Where rows hang when the line before them is empty
 
 (ert-deftest align-buffer-pads-test-rows-hang-after-an-empty-line ()
-  "Rows whose line before is empty stand in the place of that line's newline.
-Drawn in front of it they would be drawn in front of the line, its end being
-its own beginning, and the line would carry the last of the rows instead of
-its own.  Standing in the newline's place they come after the row that
-newline closes, which is the line itself."
+  "Rows whose line before is empty open with a row standing for that line.
+An empty line has its end at its own beginning, so there is nothing drawn
+before the rows to end its row the way the text of a line ends its own: the
+drawing opens with that row instead, and the rows come after it."
   (align-buffer-pads-tests--with-session "one\n\nthree\nfour\n"
       "one\n\na\nb\nthree\nfour\n"
       '((1 . 1) (2 . 2) (3 . 5) (4 . 6))
@@ -316,11 +315,14 @@ newline closes, which is the line itself."
                  (align-buffer-line-position left 2)))
       (should-not (= (overlay-start overlay)
                      (align-buffer-pad-anchor overlay)))
-      (should (null (overlay-get overlay 'before-string)))
-      ;; The row of the line itself, the two of the pad, and a newline of
-      ;; their own closing the last of them: the one the text has is the one
-      ;; they are drawn in the place of.
-      (should (equal (overlay-get overlay 'display) "\n \n \n"))
+      (should (eq (align-buffer--pad-shape overlay) 'empty-line))
+      ;; The row of the line itself and the two of the pad, the last closed by
+      ;; the line's own newline, and every one of them with a glyph that can
+      ;; carry the cursor.
+      (should (equal (overlay-get overlay 'before-string) " \n \n "))
+      ;; The reader standing on the line is drawn on its own row, above them.
+      (should (get-text-property 0 'cursor
+                                 (overlay-get overlay 'before-string)))
       (should (eq (align-buffer-pad-at (align-buffer-line-position left 3)
                                        left)
                   overlay)))))

@@ -718,14 +718,15 @@ a line the reader has read past far enough for it to have left the top."
     (align-buffer-integration--expect
      'rows-after-an-empty-line-belong-to-it "and the panes reading level"
      t (align-buffer-integration--level-p session))
-    ;; The empty line is where the reader stands to read the rows, so it is
-    ;; drawn above them rather than below: its own row is the one its number is
-    ;; drawn beside, and point resting on it belongs on that row too.
+    ;; The line owns the first row of the block and the pad the rest, which is
+    ;; what the reader standing on the line sees: a line with no text of its
+    ;; own is drawn wherever its cursor is and nowhere else.
+    (align-buffer-integration--view session 'left 40 49)
+    (select-window window)
     (align-buffer-integration--expect
      'rows-after-an-empty-line-belong-to-it
-     "the empty line is measured where it is drawn, above its rows"
-     (cdr (posn-x-y (posn-at-point (align-buffer-line-position left 49)
-                                   window)))
+     "the empty line is measured where its cursor is drawn, above its rows"
+     (align-buffer-integration--cursor-pixels window)
      (align-buffer--offset-in window (align-buffer-line-position left 49)))
     ;; Begun on the empty line itself, which is a start like any other and the
     ;; one place the rows are the first thing the window draws.  What the pane
@@ -740,6 +741,61 @@ a line the reader has read past far enough for it to have left the top."
                                    window)))
      (align-buffer--offset-in window (align-buffer-line-position left 50)))
     (align-buffer-quit session)))
+
+(defun align-buffer-integration--cursor-pixels (window)
+  "Return how far below WINDOW's top the row its cursor is drawn on begins.
+Read off the display rather than off the row we asked for the cursor on, which
+is the only way to tell a cursor the reader can see from one we have only
+requested.  A matrix a placement has left out of date answers nothing, so the
+question is put again behind a redisplay."
+  (nth 2 (or (window-line-height nil window)
+             (progn (redisplay t) (window-line-height nil window)))))
+
+(align-buffer-integration-defscenario the-cursor-walks-the-rows-it-is-asked-to
+  ;; What the rows are for: the reader steps through them a row at a time and
+  ;; sees their cursor go down the pad.  Asked of the display, since the pads
+  ;; put the cursor on a row by asking for it, and a request redisplay does
+  ;; not honour leaves the reader looking at a cursor that never moves.
+  (dolist (blank '(nil t))
+    (let* ((session (align-buffer-integration--session))
+           (left (align-buffer-session-left-buffer session))
+           (window (get-buffer-window left))
+           (height (align-buffer--row-height window))
+           (name (if blank "after an empty line" "after a line with text"))
+           (pad nil))
+      (when blank (align-buffer-integration--blank session 'left 49))
+      (setq pad (align-buffer-pad-add
+                 left (align-buffer-line-position left 50) 4
+                 'font-lock-string-face
+                 (align-buffer-session-right-buffer session) 50))
+      (with-current-buffer left (align-buffer-navigation-mode 1))
+      (align-buffer-integration--view session 'left 40 48)
+      (select-window window)
+      ;; Onto the line the rows hang on, where the reader is on no row yet.
+      (align-buffer-integration--keys "C-n")
+      (align-buffer-integration--expect
+       'the-cursor-walks-the-rows-it-is-asked-to
+       (format "the cursor is on the line the rows hang on, %s" name)
+       (align-buffer--offset-in window (align-buffer-line-position left 49))
+       (align-buffer-integration--cursor-pixels window))
+      ;; And down the rows, one press at a time.
+      (dotimes (row 4)
+        (align-buffer-integration--keys "C-n")
+        (align-buffer-integration--expect
+         'the-cursor-walks-the-rows-it-is-asked-to
+         (format "the cursor is on row %d of the pad, %s" row name)
+         (+ (align-buffer--pad-top window pad)
+            (align-buffer--pad-above window pad row))
+         (align-buffer-integration--cursor-pixels window)))
+      ;; Out of the rows onto the line they stand in front of.
+      (align-buffer-integration--keys "C-n")
+      (align-buffer-integration--expect
+       'the-cursor-walks-the-rows-it-is-asked-to
+       (format "and out of them onto the line below, %s" name)
+       (align-buffer--offset-in window (align-buffer-line-position left 50))
+       (align-buffer-integration--cursor-pixels window))
+      (ignore height)
+      (align-buffer-quit session))))
 
 (align-buffer-integration-defscenario rows-in-a-newline-s-place-are-measured-again
   ;; A pad standing in the place of an empty line's newline is measured against

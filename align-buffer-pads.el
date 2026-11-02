@@ -74,13 +74,17 @@ that it is painted too."
           (apply #'concat (make-list (1- rows) (align-buffer--pad-row face)))
           (propertize " " 'face face)))
 
-(defun align-buffer--pad-display (rows face opening)
-  "Return the display of a pad of ROWS rows standing in a newline's place.
-The rows of `align-buffer--pad-string' with a newline of their own at the end,
-closing the last of them where there is no newline left in the text to close
-it: this is the display of the newline itself."
-  (concat (align-buffer--pad-string rows face opening)
-          (propertize "\n" 'face face)))
+(defun align-buffer--pad-bare-string (rows face opening)
+  "Return the display of a pad of ROWS rows hung on a line with no text.
+
+It opens with a row of the line's own, faced OPENING, which the rows come
+after: an empty line has nothing drawn before them to end its row the way the
+newline of `align-buffer--pad-string' ends the row of a line with text.  That
+row carries a glyph like the others, so the reader standing on the line is
+drawn on it rather than on the last of the rows."
+  (concat (align-buffer--pad-row opening)
+          (apply #'concat (make-list (1- rows) (align-buffer--pad-row face)))
+          (propertize " " 'face face)))
 
 (defun align-buffer--pad-run-rows (facing facing-line lines)
   "Return how a pad's rows stand against LINES lines of FACING, or nil.
@@ -181,18 +185,15 @@ which is what lets a walk of the pad scroll the facing window alongside."
                         (save-excursion
                           (forward-line -1)
                           (line-end-position))))
-               ;; An empty line has its end at its own beginning, so rows
-               ;; drawn in front of that place would be drawn in front of the
-               ;; line rather than after it: the line would carry the last of
-               ;; the rows instead of its own, and point on it would be drawn
-               ;; a pad's height below its pair.  They stand in the place of
-               ;; its newline instead.
-               (drawn-by (if (and (/= hangs anchor)
-                                  (save-excursion
-                                    (goto-char hangs)
-                                    (bolp)))
-                             'display
-                           'before-string))
+               ;; Which of the three places the rows hang in, since the drawing
+               ;; and the measuring both turn on it.  An empty line has its end
+               ;; at its own beginning, so the rows there have nothing drawn
+               ;; before them and have to open with a row standing for the line
+               ;; itself.
+               (shape (cond ((= hangs anchor) 'first-line)
+                            ((save-excursion (goto-char hangs) (bolp))
+                             'empty-line)
+                            (t 'after-text)))
                ;; A row for every screen row the run is drawn as over there,
                ;; and which line each of them stands for.
                (run (align-buffer--pad-run-rows facing facing-line rows))
@@ -212,7 +213,7 @@ which is what lets a walk of the pad scroll the facing window alongside."
           (overlay-put overlay 'align-buffer-pad-facing facing)
           (overlay-put overlay 'align-buffer-pad-facing-line facing-line)
           (overlay-put overlay 'align-buffer-pad-opening opening)
-          (overlay-put overlay 'align-buffer-pad-drawn-by drawn-by)
+          (overlay-put overlay 'align-buffer-pad-shape shape)
           (unless (= hangs anchor)
             ;; The newline the rows are drawn in front of closes the last of
             ;; them, so it is painted like the others, and above the colour
@@ -278,76 +279,95 @@ rows stand in front of is drawn below."
   "Return how tall the whole of OVERLAY's pad is drawn, in pixels."
   (align-buffer--pad-above window overlay (align-buffer-pad-rows overlay)))
 
-(defun align-buffer--pad-drawn-by (overlay)
-  "Return the property OVERLAY's rows are drawn by."
-  (or (overlay-get overlay 'align-buffer-pad-drawn-by) 'before-string))
+(defun align-buffer--pad-shape (overlay)
+  "Return where OVERLAY's rows hang: `after-text', `empty-line' or `first-line'."
+  (or (overlay-get overlay 'align-buffer-pad-shape) 'after-text))
+
+(defun align-buffer--pad-first-glyph (shape)
+  "Return the index of the glyph the first row of a pad of SHAPE is drawn from.
+Past whatever the drawing opens with: the newline ending the row of the line
+the rows hang after, or the row standing for a line with no text of its own."
+  (pcase shape
+    ('after-text 1)
+    ('empty-line 2)
+    ('first-line 0)))
 
 (defun align-buffer--pad-show-cursor (overlay row &optional face)
   "Ask for the cursor on ROW of OVERLAY's pad, or on none when ROW is nil.
 FACE is the colour to draw the rows in, read off the rows themselves where it
-is not given, which is every drawing after the first."
+is not given, which is every drawing after the first.
+
+The reader standing on a line with no text of its own is drawn on the row that
+stands for it, which is the one its own number is drawn beside: their cursor
+would otherwise go on the glyph point is on, past every row of the pad."
   (let* ((rows (align-buffer-pad-rows overlay))
-         (property (align-buffer--pad-drawn-by overlay))
-         ;; A pad in front of the first line of the buffer has no newline of
-         ;; the line before to hang after, so its rows are drawn without the
-         ;; one that opens the others, and every index into it is one lower.
-         (hanging (/= (overlay-start overlay)
-                      (align-buffer-pad-anchor overlay)))
-         (first (if hanging 1 0))
+         (shape (align-buffer--pad-shape overlay))
+         (first (align-buffer--pad-first-glyph shape))
          (face (or face
                    (get-text-property first 'face
-                                      (overlay-get overlay property))))
+                                      (overlay-get overlay 'before-string))))
          (opening (overlay-get overlay 'align-buffer-pad-opening))
-         (string (cond
-                  ((eq property 'display)
-                   (align-buffer--pad-display rows face opening))
-                  (hanging (align-buffer--pad-string rows face opening))
-                  (t (apply #'concat
-                            (make-list rows (align-buffer--pad-row face)))))))
-    (when row
-      ;; The space of that row, which is the glyph the row is drawn from.
-      (let ((at (+ first (* row 2))))
-        (put-text-property at (1+ at) 'cursor t string)))
-    (overlay-put overlay property string)))
+         (string (pcase shape
+                   ('after-text (align-buffer--pad-string rows face opening))
+                   ('empty-line
+                    (align-buffer--pad-bare-string rows face opening))
+                   ('first-line
+                    (apply #'concat
+                           (make-list rows (align-buffer--pad-row face))))))
+         ;; The space of the row, which is the glyph it is drawn from.
+         (at (if row
+                 (+ first (* row 2))
+               (and (eq shape 'empty-line) 0))))
+    (when at (put-text-property at (1+ at) 'cursor t string))
+    (overlay-put overlay 'before-string string)))
+
+(defun align-buffer--pad-hung-at (position)
+  "Return the pad whose rows hang at POSITION, or nil."
+  (save-restriction
+    (widen)
+    ;; Either the pad in front of the line after POSITION or, at the very
+    ;; beginning of the buffer, the one in front of POSITION's own line: a pad
+    ;; there has no line before it to hang after, so it hangs where it is
+    ;; drawn.
+    (let ((here (align-buffer-pad-at position))
+          (next (and (< position (point-max))
+                     (align-buffer-pad-at (1+ position)))))
+      (cond ((and here (= (align-buffer-pad-hangs here) position)) here)
+            ((and next (= (align-buffer-pad-hangs next) position)) next)))))
 
 (defun align-buffer--pad-uncounted (window from to)
-  "Return the height of the pad rows WINDOW draws below FROM without counting.
+  "Return the height of the pad rows WINDOW draws between FROM and TO uncounted.
+Negative where the span counts rows that are drawn outside it.
 
 A span can begin inside the one character a pad hangs on: that character is
 the newline the rows are drawn in front of, and `recenter' leaves a window
 start there, there being no row boundary inside the rows for it to take
 instead.  The rows are then drawn from the very top of the window, and a span
-measured from there is measured as none of them.
+measured from there is measured as none of them.  The whole pad counts, since
+all of it is drawn above the line it hangs in front of: a span reaching that
+line, or anywhere below it, has every row of the pad between its ends.
 
-Except where they stand in the place of a newline: a span beginning there
-begins at the character that draws them, so it carries them already.
-
-The whole pad counts, since all of it is drawn above the line it hangs in
-front of: a span reaching that line, or anywhere below it, has every row of
-the pad between its ends."
-  (let ((pad (with-current-buffer (window-buffer window)
-               (save-restriction
-                 (widen)
-                 ;; The pad hanging at FROM, which is either the one in front
-                 ;; of the line after it or, at the very beginning of the
-                 ;; buffer, the one in front of FROM's own line: a pad there
-                 ;; has no line before it to hang after, so it hangs where it
-                 ;; is drawn.
-                 (let ((here (align-buffer-pad-at from))
-                       (next (and (< from (point-max))
-                                  (align-buffer-pad-at (1+ from)))))
-                   (cond
-                    ((and here (= (align-buffer-pad-hangs here) from)) here)
-                    ((and next (= (align-buffer-pad-hangs next) from)
-                          ;; Rows standing in the place of a newline are drawn
-                          ;; by that character, which a span beginning at it
-                          ;; has inside it: those are counted already.
-                          (not (eq (align-buffer--pad-drawn-by next)
-                                   'display)))
-                     next)))))))
-    (if (and pad (>= to (align-buffer-pad-anchor pad)))
-        (align-buffer-pad-height window pad)
-      0)))
+The rows hung on a line with no text are drawn at the place the span would
+begin rather than after text of its own, so a span from there carries them
+already.  A span ending there carries them too, and they belong below its end:
+the line is drawn on the first row of the block standing in for it and the
+rows come after, so the whole block comes off.  That holds of a span of no
+width as well, which is how much of the block hangs above the line - none of
+it - rather than how tall the block is."
+  (with-current-buffer (window-buffer window)
+    (let ((begins (align-buffer--pad-hung-at from))
+          (ends (align-buffer--pad-hung-at to)))
+      (- (if (and begins
+                  (not (eq (align-buffer--pad-shape begins) 'empty-line))
+                  (>= to (align-buffer-pad-anchor begins)))
+             (align-buffer-pad-height window begins)
+           0)
+         (if (and ends (eq (align-buffer--pad-shape ends) 'empty-line))
+             ;; The row standing for the line as well as the pad's own, the
+             ;; line being drawn above all of them.
+             (+ (align-buffer-pad-height window ends)
+                (align-buffer--row-height window))
+           0)))))
 
 (setq align-buffer-uncounted-height-function #'align-buffer--pad-uncounted)
 
