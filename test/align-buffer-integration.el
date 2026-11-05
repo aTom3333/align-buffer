@@ -695,13 +695,11 @@ a line the reader has read past far enough for it to have left the top."
   (let* ((session (align-buffer-integration--session))
          (left (align-buffer-session-left-buffer session))
          (window (get-buffer-window left))
-         (height (align-buffer--row-height window))
-         (pad nil))
+         (height (align-buffer--row-height window)))
     (align-buffer-integration--blank session 'left 49)
-    (setq pad (align-buffer-pad-add
-               left (align-buffer-line-position left 50) 4
-               'font-lock-string-face
-               (align-buffer-session-right-buffer session) 50))
+    (align-buffer-pad-add left (align-buffer-line-position left 50) 4
+                          'font-lock-string-face
+                          (align-buffer-session-right-buffer session) 50)
     (align-buffer-integration--view session 'left 40 45)
     (align-buffer-integration--expect
      'rows-after-an-empty-line-belong-to-it

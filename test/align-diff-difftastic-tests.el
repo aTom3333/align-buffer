@@ -231,6 +231,33 @@ text a line diff would have left over."
                     (align-diff-difftastic-tests--reading old new))
                    '(ranges (left 1 11 12) (right 1 11 12))))))
 
+(ert-deftest align-diff-difftastic-test-a-line-compared-as-text-is-refined-here ()
+  "A stretch compared line by line is handed over to be compared again.
+Every token of such a line is marked, so difftastic's own marks would colour
+the line whole and say no more than the colour it already carries."
+  (align-diff-difftastic-tests--with-buffers
+      "txt" "x = foo(1, 2)\n" "x = foo(1, 3)\n"
+    (should (equal (align-diff-reading-refine
+                    (align-diff-difftastic-tests--reading old new))
+                   '(regions (1 1 1 1))))))
+
+(ert-deftest align-diff-difftastic-test-a-parse-given-up-on-is-refined-here-too ()
+  "A file difftastic begins to parse and gives up on is compared as text."
+  (let ((align-diff-difftastic-switches '("--graph-limit" "1")))
+    (align-diff-difftastic-tests--with-buffers
+        "py" "x = foo(1, 2)\n" "x = foo(1, 3)\n"
+      (should (equal (align-diff-reading-refine
+                      (align-diff-difftastic-tests--reading old new))
+                     '(regions (1 1 1 1)))))))
+
+(ert-deftest align-diff-difftastic-test-text-has-the-words-that-differ-marked ()
+  "The characters marked inside a line compared as text are the words of it
+that differ, not the whole of a line whose every token difftastic marked."
+  (align-diff-difftastic-tests--with-session
+      "txt" "x = foo(1, 2)\n" "x = foo(1, 3)\n"
+    (should (equal (align-diff-tests--refinements session 'left) '("2")))
+    (should (equal (align-diff-tests--refinements session 'right) '("3")))))
+
 (ert-deftest align-diff-difftastic-test-the-marked-characters-count-characters ()
   "A range counts the characters of a line, where difftastic counts its bytes.
 A line holding a character of more than one byte would otherwise mark the text

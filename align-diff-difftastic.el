@@ -18,7 +18,10 @@
 ;; characters it marks are the tokens that differ rather than a stretch of
 ;; text two line diffs happened to have in common.  A language it has no
 ;; parser for it compares line by line, which is also what it does with a
-;; buffer whose name gives no extension to read a language off.
+;; buffer whose name gives no extension to read a language off, and with one
+;; it begins to parse and gives up on.  A line it compared that way is marked
+;; whole, so which characters differ inside it is left to the comparison the
+;; line diff is refined with.
 ;;
 ;; Both sides go to a temp file, difftastic reading files rather than text,
 ;; and the two files carry one extension - the new side's, that being the name
@@ -144,6 +147,17 @@ every one of them and show one change as several."
 
 
 ;;; The characters difftastic marks
+
+(defun align-diff-difftastic--line-diff-p (report)
+  "Return non-nil when REPORT compared the two sides line by line.
+difftastic names the language it parsed with, and calls that Text where it
+parsed with none: a language it has no parser for, a name that gives no
+extension to read one off, or a file it gave up on, which it says in
+parentheses after the name.  Every token of a changed line is a change of its
+own then, so what it marks of such a line is the whole of it."
+  (let ((language (alist-get 'language report)))
+    (and (stringp language)
+         (string-match-p "\\`Text\\(?: (\\|\\'\\)" language))))
 
 (defun align-diff-difftastic--line-text (buffer line)
   "Return LINE of BUFFER, without its newline."
@@ -356,18 +370,26 @@ for one."
              (stretches (align-diff-difftastic--stretches
                          entries
                          (align-diff-difftastic--table left-changed)
-                         (align-diff-difftastic--table right-changed))))
+                         (align-diff-difftastic--table right-changed)))
+             (sections (align-diff-difftastic--sections
+                        stretches old-lines new-lines)))
         (list :pairs (align-diff-difftastic--pairs entries)
-              :sections (align-diff-difftastic--sections
-                         stretches old-lines new-lines)
+              :sections sections
               :runs (align-diff-difftastic--runs stretches)
               :gaps (align-diff-difftastic--gaps stretches old-lines new-lines)
               :refine
-              (cons 'ranges
-                    (append (align-diff-difftastic--ranges
-                             chunks 'left old old-lines)
-                            (align-diff-difftastic--ranges
-                             chunks 'right new new-lines))))))))
+              (if (align-diff-difftastic--line-diff-p report)
+                  ;; A stretch difftastic compared as text carries a mark over
+                  ;; every token of it, so handing those on would colour each
+                  ;; changed line whole and say no more than its own colour
+                  ;; does.  We hand the stretch over to be compared instead,
+                  ;; which is where the words that differ in it come from.
+                  (cons 'regions sections)
+                (cons 'ranges
+                      (append (align-diff-difftastic--ranges
+                               chunks 'left old old-lines)
+                              (align-diff-difftastic--ranges
+                               chunks 'right new new-lines)))))))))
 
 (defun align-diff-difftastic--reading (old new)
   "Return difftastic's reading of buffer OLD against buffer NEW."
