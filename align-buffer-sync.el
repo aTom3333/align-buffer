@@ -231,15 +231,29 @@ Measured as a span of no width, which is where rows hanging at a position are
 counted and nothing else is."
   (align-buffer--pixels-between window position position))
 
+(defun align-buffer-stretch-display-height (window from next)
+  "Return the pixel height of everything WINDOW draws from FROM up to NEXT.
+NEXT is where the line below the stretch begins, and nil where the stretch
+runs to the end of the buffer.
+
+Measured to that beginning, less what hangs there.  Rows hanging at a
+position are counted at either edge of a span, so the span to the line below
+carries the rows hung on it and they have to come off again; and measuring to
+the end of the stretch's own last line instead is no answer, since on an empty
+line that span has no width and comes to nothing at all."
+  (with-current-buffer (window-buffer window)
+    (save-restriction
+      (widen)
+      (if next
+          (- (align-buffer--pixels-between window from next)
+             (align-buffer--hanging-height window next))
+        ;; Nothing below the last line to hang anything of its own, so the
+        ;; span to the end of the buffer is the stretch and no more.
+        (align-buffer--pixels-between window from (point-max))))))
+
 (defun align-buffer-line-display-height (window position)
   "Return the pixel height of the display of the line POSITION is on in WINDOW.
-Everything that line is drawn as, the rows an overlay hangs on it included.
-
-Measured to the beginning of the next line, less what hangs there.  Rows
-hanging at a position are counted at either edge of a span, so the span to
-the next line carries that line's rows and they have to come off again; and
-measuring to this line's own end instead is no answer, since on an empty line
-that span has no width and comes to nothing at all."
+Everything that line is drawn as, the rows an overlay hangs on it included."
   (with-current-buffer (window-buffer window)
     (save-restriction
       (widen)
@@ -247,12 +261,7 @@ that span has no width and comes to nothing at all."
         (goto-char position)
         (let* ((from (line-beginning-position))
                (next (and (zerop (forward-line 1)) (point))))
-          (if next
-              (- (align-buffer--pixels-between window from next)
-                 (align-buffer--hanging-height window next))
-            ;; Nothing below the last line to hang anything of its own, so
-            ;; the span to the end of the buffer is the line and no more.
-            (align-buffer--pixels-between window from (point-max))))))))
+          (align-buffer-stretch-display-height window from next))))))
 
 (defun align-buffer-scroll (window pixels)
   "Scroll WINDOW down by PIXELS, negative meaning up.

@@ -772,5 +772,67 @@ with the row facing its own text."
       (should-not (align-buffer-facing-pad session 'right 1))
       (should-not (align-buffer-facing-pad session 'left 2)))))
 
+;;; Measuring a long run
+
+(defun align-buffer-pads-tests--numbered (name from to)
+  "Return the lines of NAME numbered FROM to TO, each as its own line."
+  (mapconcat (lambda (line) (format "%s line %03d\n" name line))
+             (number-sequence from to)
+             ""))
+
+(defmacro align-buffer-pads-tests--with-long-run (run &rest body)
+  "Run BODY over a session whose right side has RUN lines the left has not.
+Thirty lines pair across, the run follows, and thirty more pair after it.
+`line' is the first line of the run, and `pad' stands for the whole of it in
+the left."
+  (declare (indent 1))
+  `(let ((run ,run))
+     (align-buffer-pads-tests--with-session
+         (align-buffer-pads-tests--numbered "old" 1 60)
+         (concat (align-buffer-pads-tests--numbered "new" 1 30)
+                 (align-buffer-pads-tests--numbered "only" 1 run)
+                 (align-buffer-pads-tests--numbered "new" 31 60))
+         (append (cl-loop for pair from 1 to 30 collect (cons pair pair))
+                 (cl-loop for offset from 0 below 30
+                          collect (cons (+ 31 offset)
+                                        (+ 31 run offset))))
+       (let* ((line 31)
+              (pad (align-buffer-pads-tests--pad left line run right line)))
+         (ignore pad)
+         ,@body))))
+
+(ert-deftest align-buffer-pads-test-a-plain-run-is-measured-in-stretches ()
+  "A run drawn as a row a line is measured a stretch at a time.
+The pads facing a run are measured afresh whenever a window changes size or a
+consumer draws a row, which is several times a keypress for a reader
+scrolling, so a measurement for every line of a long run is a wait they can
+see."
+  (let ((spans 0))
+    (advice-add 'window-text-pixel-size :before
+                (lambda (&rest _) (setq spans (1+ spans)))
+                '((name . align-buffer-pads-tests--count)))
+    (unwind-protect
+        (align-buffer-pads-tests--with-long-run 200
+          (should (equal (align-buffer-pad-rows pad) 200))
+          (should (equal (align-buffer-pad-facing-line pad 0) line))
+          (should (equal (align-buffer-pad-facing-line pad 199) (+ line 199)))
+          (should (equal (align-buffer-pad-text-row pad (+ line 100)) 100))
+          (should (< spans 20)))
+      (advice-remove 'window-text-pixel-size
+                     'align-buffer-pads-tests--count))))
+
+(ert-deftest align-buffer-pads-test-rows-hung-in-a-long-run-are-found ()
+  "Rows hung on one line of a long run are measured into the pad all the same.
+What a stretch measured whole must not swallow: the run is drawn as one row
+more than it has lines, and the row belongs under the line it hangs on."
+  (align-buffer-pads-tests--with-long-run 200
+    (align-buffer-pads-tests--hang right (+ line 100) 1)
+    (align-buffer-rows-changed)
+    (align-buffer--measure-and-level)
+    (should (equal (align-buffer-pad-rows pad) 201))
+    (should (equal (align-buffer-pad-text-row pad (+ line 100)) 100))
+    (should (equal (align-buffer-pad-facing-line pad 101) (+ line 100)))
+    (should (equal (align-buffer-pad-facing-line pad 102) (+ line 101)))))
+
 (provide 'align-buffer-pads-tests)
 ;;; align-buffer-pads-tests.el ends here

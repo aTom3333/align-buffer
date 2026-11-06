@@ -102,6 +102,65 @@ drawn on it rather than on the last of the rows."
           (apply #'concat (make-list (1- rows) (align-buffer--pad-row face)))
           (propertize " " 'face face)))
 
+(defun align-buffer--line-rows (window buffer line height)
+  "Return how many rows WINDOW draws LINE of BUFFER as, as (HANGING . WHOLE).
+HANGING is how many of them hang in front of the line's own text, WHOLE how
+many the line is drawn as altogether, HEIGHT what one of them is worth."
+  (let* ((position (align-buffer-line-position buffer line))
+         (hanging (if position
+                      (max 0 (round (align-buffer--hanging-height window
+                                                                  position)
+                                    height))
+                    0))
+         (whole (if position
+                    (max (1+ hanging)
+                         (round (align-buffer-line-display-height window
+                                                                  position)
+                                height))
+                  1)))
+    (cons hanging whole)))
+
+(defun align-buffer--run-plain-p (window buffer first lines height)
+  "Return non-nil when LINES lines of BUFFER from FIRST are a row each in WINDOW.
+
+A line is drawn at least a row tall, and rows hung on one are drawn as well as
+it rather than instead of it, so a stretch drawn as exactly a row a line has
+nothing hung anywhere in it and nothing wrapped."
+  (let ((from (align-buffer-line-position buffer first)))
+    (and from
+         (= (align-buffer-stretch-display-height
+             window from
+             (with-current-buffer buffer
+               (save-restriction
+                 (widen)
+                 (save-excursion
+                   (goto-char from)
+                   (and (zerop (forward-line lines)) (point))))))
+            (* lines height)))))
+
+(defun align-buffer--run-rows (window buffer first lines height)
+  "Return how many rows WINDOW draws each of LINES lines from FIRST as.
+One (HANGING . WHOLE) a line of BUFFER, in order from FIRST, HEIGHT being what
+a row is worth.
+
+Measured a stretch at a time rather than a line at a time: a stretch drawn as
+exactly a row a line is answered whole, and only one drawn as something else
+is halved and each half asked again, down to the single line that is measured
+for itself.  So what a run costs to measure follows the lines in it that are
+drawn as more than one row rather than the length of the run, which matters
+because the pads facing a run are measured afresh every time a window changes
+size or a consumer draws a row - several times a keypress, for a reader
+scrolling through a run of thousands of lines."
+  (cond
+   ((<= lines 0) nil)
+   ((= lines 1) (list (align-buffer--line-rows window buffer first height)))
+   ((align-buffer--run-plain-p window buffer first lines height)
+    (make-list lines (cons 0 1)))
+   (t (let ((half (/ lines 2)))
+        (nconc (align-buffer--run-rows window buffer first half height)
+               (align-buffer--run-rows window buffer (+ first half)
+                                       (- lines half) height))))))
+
 (defun align-buffer--pad-run-rows (facing facing-line lines)
   "Return how a pad's rows stand against LINES lines of FACING, or nil.
 
@@ -116,27 +175,19 @@ Nil where those lines are drawn nowhere yet, no window of theirs being up to
 measure them in, and a pad then draws one row for each line."
   (let ((window (and (buffer-live-p facing) (get-buffer-window facing))))
     (when (and window facing-line (> lines 0))
-      (let ((height (align-buffer--row-height window))
-            (rows nil)
+      (let ((rows nil)
             (text (make-vector lines 0))
-            (row 0))
-        (dotimes (index lines)
-          (let* ((line (+ facing-line index))
-                 (position (align-buffer-line-position facing line))
-                 (hanging (if position
-                              (max 0 (round (align-buffer--hanging-height
-                                             window position)
-                                            height))
-                            0))
-                 (whole (if position
-                            (max (1+ hanging)
-                                 (round (align-buffer-line-display-height
-                                         window position)
-                                        height))
-                          1)))
+            (row 0)
+            (index 0))
+        (dolist (line-rows (align-buffer--run-rows window facing facing-line
+                                                   lines
+                                                   (align-buffer--row-height
+                                                    window)))
+          (pcase-let ((`(,hanging . ,whole) line-rows))
             (aset text index (+ row hanging))
-            (dotimes (_ whole) (push line rows))
-            (setq row (+ row whole))))
+            (dotimes (_ whole) (push (+ facing-line index) rows))
+            (setq row (+ row whole))
+            (setq index (1+ index))))
         (cons (vconcat (nreverse rows)) text)))))
 
 (defun align-buffer-pad-facing-line (overlay row)
