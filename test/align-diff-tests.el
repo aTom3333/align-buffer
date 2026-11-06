@@ -553,6 +553,27 @@ hunk included."
     (align-diff-refresh session)
     (should (equal (align-diff-tests--gaps old) '((2 . slit))))))
 
+(ert-deftest align-diff-test-the-pads-are-there-when-the-apply-hook-runs ()
+  "A consumer drawing against the pads is run once they are drawn.
+The panes being laid out says nothing about them, the reading being drawn
+after that, and a reading drawn afresh runs it again."
+  (let* ((align-diff-gap-marker 'pad)
+         (applied nil)
+         (laid-out nil)
+         (align-diff-post-apply-functions
+          (list (lambda (session)
+                  (push (and (align-buffer-facing-pad session 'right 3) t)
+                        applied))))
+         (align-buffer-post-layout-functions
+          (list (lambda (session _windows)
+                  (push (and (align-buffer-facing-pad session 'right 3) t)
+                        laid-out)))))
+    (align-diff-tests--with-session "one\ntwo\n" "one\na\nb\nc\ntwo\n"
+      (should (equal laid-out '(nil)))
+      (should (equal applied '(t)))
+      (align-diff-refresh session)
+      (should (equal applied '(t t))))))
+
 
 ;;; Colouring the characters
 

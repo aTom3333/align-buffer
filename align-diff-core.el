@@ -165,6 +165,16 @@ since no position in the buffer falls inside them."
   :type 'boolean
   :group 'align-diff)
 
+(defvar align-diff-post-apply-functions nil
+  "Functions run with the session once a reading has been drawn in its panes.
+Everything the reading says is there by then: the colours, the marks where a
+side has no lines for the other's, and the pads standing for a run one side
+alone has.  For a consumer drawing against those, which is more than the
+panes being laid out says.
+
+Run again every time the buffers are read afresh, the drawing being made
+anew each time.")
+
 (defvar-local align-diff-language-extension nil
   "The extension a backend reads this buffer's language off, as a string.
 Set by whoever puts the text here, and read in front of the buffer's own
@@ -568,6 +578,7 @@ them where they stand."
       (align-diff--set-property session :align-diff-pairs pairs)
       (align-buffer-set-pairs session pairs)))
   (align-diff--paint session reading)
+  (run-hook-with-args 'align-diff-post-apply-functions session)
   session)
 
 (defun align-diff-refresh (&optional session)
