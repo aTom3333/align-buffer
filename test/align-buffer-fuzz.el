@@ -565,8 +565,8 @@ is standing in: reading the rows, or reading the lines they stand for."
                       (align-buffer-fuzz--best-achievable follower line
                                                           own)))))
         (let* ((line (align-buffer-line-at buffer (window-point leader)))
-               (facing (and line (align-buffer--facing-pad session side line
-                                                           leader))))
+               (facing (and line (align-buffer-facing-pad session side line
+                                                          leader))))
           (when facing
             (pcase-let ((`(,pad . ,row) facing))
               ;; The reader's own screen row, which is what the row stands

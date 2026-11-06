@@ -650,5 +650,85 @@ Nothing says how wide those lines wrap, so a measure of none is no answer."
     (align-buffer--measure-and-level)
     (should (equal (align-buffer-pad-rows pad) 2))))
 
+;;; Answering rows hung on a line a pad faces
+
+(defun align-buffer-pads-tests--hang (buffer line rows)
+  "Hang ROWS rows under LINE of BUFFER, as a consumer anchors a note on it.
+In front of the line's own newline, so they are drawn after its text and
+belong to the display of that line.  Return the overlay drawing them."
+  (with-current-buffer buffer
+    (let* ((end (save-excursion
+                  (goto-char (align-buffer-line-position buffer line))
+                  (line-end-position)))
+           (overlay (make-overlay end end buffer)))
+      (overlay-put overlay 'before-string
+                   (concat "\n" (mapconcat (lambda (row) (format "note %d" row))
+                                           (number-sequence 1 rows)
+                                           "\n")))
+      overlay)))
+
+(defmacro align-buffer-pads-tests--with-noted-session (&rest body)
+  "Run BODY over a session whose right side has three lines the left has not.
+`note' hangs three rows under the middle of them, and `pad' stands in the
+left for the run, which `line' numbers from."
+  (declare (indent 0))
+  `(align-buffer-pads-tests--with-session
+       "one\ntwo\n"
+       "one\nnew a\nnew b\nnew c\ntwo\n"
+       '((1 . 1) (2 . 5))
+     (let ((line 3))
+       ,@body)))
+
+(ert-deftest align-buffer-pads-test-a-pad-counts-the-rows-hung-on-a-line-it-faces ()
+  "A pad has a row for every screen row the run it stands for is drawn as,
+the rows another package hangs on one of those lines included."
+  (align-buffer-pads-tests--with-noted-session
+    (align-buffer-pads-tests--hang right line 3)
+    (let ((pad (align-buffer-pads-tests--pad left 2 3 right 2)))
+      (should (equal (align-buffer-pad-rows pad) 6))
+      (should (equal (mapcar (lambda (row)
+                               (align-buffer-pad-facing-line pad row))
+                             (number-sequence 0 5))
+                     '(2 3 3 3 3 4)))
+      (should (equal (align-buffer-pad-text-row pad line) 1)))))
+
+(ert-deftest align-buffer-pads-test-rows-hung-after-a-pad-are-measured-in ()
+  "Rows hung on a line a pad already stands for are measured into it.
+`align-buffer-rows-changed' is what asks for it, and the rows land between
+the row facing that line's own text and the row facing the line below."
+  (align-buffer-pads-tests--with-noted-session
+    (let ((pad (align-buffer-pads-tests--pad left 2 3 right 2)))
+      (should (equal (align-buffer-pad-rows pad) 3))
+      (align-buffer-pads-tests--hang right line 3)
+      (align-buffer-rows-changed)
+      (should align-buffer--resize-timer)
+      (align-buffer--measure-and-level)
+      (should (equal (align-buffer-pad-rows pad) 6))
+      (should (equal (align-buffer-pad-text-row pad line) 1))
+      (should (equal (align-buffer-pad-facing-line pad 2) line))
+      (should (equal (align-buffer-pad-facing-line pad 5) 4)))))
+
+(ert-deftest align-buffer-pads-test-rows-taken-off-a-line-leave-the-pad-short ()
+  "A pad measured again after the rows go back stands for the lines alone."
+  (align-buffer-pads-tests--with-noted-session
+    (let ((note (align-buffer-pads-tests--hang right line 3))
+          (pad (align-buffer-pads-tests--pad left 2 3 right 2)))
+      (should (equal (align-buffer-pad-rows pad) 6))
+      (delete-overlay note)
+      (align-buffer-rows-changed)
+      (align-buffer--measure-and-level)
+      (should (equal (align-buffer-pad-rows pad) 3)))))
+
+(ert-deftest align-buffer-pads-test-the-pad-facing-a-line-of-a-run-is-found ()
+  "The pad standing for a line one side alone has is found from that line,
+with the row facing its own text."
+  (align-buffer-pads-tests--with-noted-session
+    (let ((pad (align-buffer-pads-tests--pad left 2 3 right 2)))
+      (should (equal (align-buffer-facing-pad session 'right line)
+                     (cons pad 1)))
+      ;; A line both sides have is faced by a line, not by rows.
+      (should-not (align-buffer-facing-pad session 'right 1))
+      (should-not (align-buffer-facing-pad session 'left 2)))))
+
 (provide 'align-buffer-pads-tests)
 ;;; align-buffer-pads-tests.el ends here

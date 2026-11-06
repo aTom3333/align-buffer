@@ -12,6 +12,12 @@
 ;; away with `align-buffer-pad-clear'.  What they look like is the consumer's,
 ;; which hands in the face they are drawn in; what they behave like is here.
 ;;
+;; A pad stands for the whole display of the lines it faces, so rows another
+;; package hangs on one of those lines are rows of the pad too, drawn between
+;; the row facing that line's text and the row facing the line below it.
+;; Whoever hangs them says so with `align-buffer-rows-changed', which is what
+;; has the pads measured against the lines as they are drawn then.
+;;
 ;; `align-buffer-navigation-mode' is what makes them behave like the lines
 ;; they stand for: the ordinary motion and scroll commands walk them row by
 ;; row instead of stepping over the lot in one go, which is what they do with
@@ -858,7 +864,7 @@ position and the rows holding none."
                               0))))
                   nearby)))))
 
-(defun align-buffer--facing-pad (session side line &optional window)
+(defun align-buffer-facing-pad (session side line &optional window)
   "Return the pad standing for LINE on the side facing SIDE, as (PAD . ROW).
 
 Nil unless LINE is one of a run the other side has not got.  The pads make
@@ -1436,7 +1442,7 @@ pad that stands for them, and they are ours to keep level."
          (line (and session side
                     (align-buffer-line-at (current-buffer)
                                           (window-point window))))
-         (facing (and line (align-buffer--facing-pad session side line
+         (facing (and line (align-buffer-facing-pad session side line
                                                     window))))
     (cond
      (facing
@@ -1549,7 +1555,7 @@ line drawn at another height moves is the pane facing it."
            ;; Inside a run the other side has not got, the rows standing for it
            ;; are, the pairs saying nothing there.
            ((and side line
-                 (align-buffer--facing-pad session side line leader))
+                 (align-buffer-facing-pad session side line leader))
             (align-buffer--face-run leader))
            ;; Elsewhere the pairs speak, which is the ordinary placement.  A
            ;; scroll gets it from the hook that heard the scroll; a size
@@ -1574,20 +1580,31 @@ line drawn at another height moves is the pane facing it."
         (align-buffer--measure-pads-in (align-buffer-buffer session side)))
       (align-buffer--level-again session))))
 
+(defun align-buffer-rows-changed ()
+  "Answer rows another package has drawn on a line, or taken off one.
+
+A pad stands for the whole display of the lines it faces, the rows hung on
+them included, so a line drawn as more rows than it was leaves the pads
+facing it standing a run short.  Measure them against the display as it
+stands now, and place the panes level afresh.
+
+Once redisplay is over, which is also what gathers the calls of a redrawing
+into one: a window placed from inside a redisplay is put back by the pass
+that follows."
+  (unless align-buffer--resize-timer
+    (setq align-buffer--resize-timer
+          (run-with-timer 0 nil #'align-buffer--measure-and-level))))
+
 (defun align-buffer--size-changed (frame)
-  "Have the panes shown in FRAME measured and placed level again.
-Once redisplay is over: this runs from inside it, and a window placed from
-there is put back by the pass that follows."
+  "Have the panes shown in FRAME measured and placed level again."
   ;; Errors demoted: Emacs REMOVES a hook function that signals, so one error
   ;; would leave every later size change unanswered.
   (with-demoted-errors "align-buffer resize: %S"
     (when (and (frame-live-p frame)
                (seq-some (lambda (window)
                            (align-buffer-session-for (window-buffer window)))
-                         (window-list frame 'no-minibuffer))
-               (not align-buffer--resize-timer))
-      (setq align-buffer--resize-timer
-            (run-with-timer 0 nil #'align-buffer--measure-and-level)))))
+                         (window-list frame 'no-minibuffer)))
+      (align-buffer-rows-changed))))
 
 (add-hook 'window-size-change-functions #'align-buffer--size-changed)
 

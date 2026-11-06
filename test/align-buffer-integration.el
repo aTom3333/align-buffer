@@ -191,6 +191,23 @@ Lines 1 to 100 pair across; 101 to 140 of the left have no counterpart; 201 to
                                 "")))
       (set-buffer-modified-p nil))))
 
+(defun align-buffer-integration--note-under (session side line rows)
+  "Hang ROWS screen rows of display under LINE of SESSION's SIDE buffer.
+In front of the line's own newline, which is where a note anchored on a line
+is drawn: after the text of that line and above the line below it."
+  (let ((buffer (align-buffer-buffer session side)))
+    (with-current-buffer buffer
+      (let* ((end (save-excursion
+                    (goto-char (align-buffer-line-position buffer line))
+                    (line-end-position)))
+             (overlay (make-overlay end end buffer)))
+        (overlay-put overlay 'before-string
+                     (concat "\n" (mapconcat
+                                   (lambda (row) (format "a note, row %d" row))
+                                   (number-sequence 1 rows)
+                                   "\n"))))
+      (set-buffer-modified-p nil))))
+
 (defun align-buffer-integration--heighten (session side line scale)
   "Give LINE of SESSION's SIDE buffer a face SCALE times the usual height."
   (let ((buffer (align-buffer-buffer session side)))
@@ -982,6 +999,56 @@ question is put again behind a redisplay."
            (align-buffer-integration--level-p session)))
     (align-buffer-quit session)))
 
+
+(align-buffer-integration-defscenario rows-hung-in-a-run-are-rows-of-the-pad
+  ;; A note hung on a line of a run the other side has not got has no line
+  ;; over there to hang blank rows on, the whole run being drawn there as the
+  ;; rows of a pad.  Those rows stand for the display of the lines, so the
+  ;; note is made room for by measuring the pad again, and the rows facing it
+  ;; are rows of the pad like the rest.
+  (let* ((session (align-buffer-integration--session))
+         (left (align-buffer-session-left-buffer session))
+         (right (align-buffer-session-right-buffer session))
+         (window (get-buffer-window left))
+         (facing (get-buffer-window right))
+         (height (align-buffer--row-height window))
+         (pad (align-buffer-pad-add right
+                                    (align-buffer-line-position right 101)
+                                    40 'font-lock-string-face left 101)))
+    (align-buffer-integration--view session 'left 100 110)
+    (align-buffer-integration--expect
+     'rows-hung-in-a-run-are-rows-of-the-pad
+     "the pad stands as tall as the run it faces"
+     (align-buffer-integration--run-height window 101 40)
+     (align-buffer-pad-height facing pad))
+    ;; The note itself: three rows under line 110 of the run.
+    (align-buffer-integration--note-under session 'left 110 3)
+    (align-buffer-rows-changed)
+    (align-buffer-integration--settle)
+    (align-buffer-integration--expect
+     'rows-hung-in-a-run-are-rows-of-the-pad
+     "and as tall as the run with the note drawn in it"
+     (align-buffer-integration--run-height window 101 40)
+     (align-buffer-pad-height facing pad))
+    (align-buffer-integration--expect
+     'rows-hung-in-a-run-are-rows-of-the-pad
+     "with a row of the pad for each row of the note"
+     '(109 110 110 110 110 111)
+     (let ((row (align-buffer-pad-text-row pad 109)))
+       (mapcar (lambda (index)
+                 (align-buffer-pad-facing-line pad (+ row index)))
+               (number-sequence 0 5))))
+    ;; What the reader sees: the first row of the note is drawn level with the
+    ;; row of the pad that faces it.
+    (align-buffer-integration--expect
+     'rows-hung-in-a-run-are-rows-of-the-pad
+     "and the note level with the rows facing it"
+     (+ (align-buffer--offset-in window (align-buffer-line-position left 110))
+        height)
+     (+ (align-buffer--pad-top facing pad)
+        (align-buffer--pad-above facing pad
+                                 (1+ (align-buffer-pad-text-row pad 110)))))
+    (align-buffer-quit session)))
 
 ;;; Running
 
