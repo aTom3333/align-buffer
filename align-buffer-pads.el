@@ -1601,9 +1601,19 @@ line drawn at another height moves is the pane facing it."
                                (get-buffer-window
                                 (align-buffer-buffer session side)))
                              '(left right))))
-         (leader (if (memq (selected-window) windows)
-                     (selected-window)
-                   (car windows))))
+         ;; The pane the reader is in, and where they are standing in neither
+         ;; - a window of someone else's selected, a hint window up over the
+         ;; frame, a timer running between one command and the next - the pane
+         ;; they were in last.  Either pane will do where they have been in
+         ;; neither, and one of them while the other is being read will not: a
+         ;; reader inside a run is held level with the rows standing for it,
+         ;; and the pairs say nothing there, so a placement led from the side
+         ;; the pad is on puts their own pane back at the pair the run hangs
+         ;; after - the whole run above where they were reading.
+         (leader (cond ((memq (selected-window) windows) (selected-window))
+                       ((memq align-buffer--last-window windows)
+                        align-buffer--last-window)
+                       (t (car windows)))))
     ;; The placements are noted as they were taken, so a pad of another height
     ;; leaves them saying the panes are level when they are not.
     (mapc #'align-buffer-forget-placement windows)

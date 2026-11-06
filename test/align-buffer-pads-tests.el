@@ -834,5 +834,27 @@ more than it has lines, and the row belongs under the line it hangs on."
     (should (equal (align-buffer-pad-facing-line pad 101) (+ line 100)))
     (should (equal (align-buffer-pad-facing-line pad 102) (+ line 101)))))
 
+(ert-deftest align-buffer-pads-test-a-measure-from-outside-keeps-the-reader-s-view ()
+  "A measure taken while neither pane is selected leads from the reader's pane.
+The pairs say nothing inside a run, so one led from the side the pad is on
+places their own pane from the pair the run hangs after, which is the whole
+run above where they were reading."
+  (align-buffer-pads-tests--with-long-run 200
+    (let ((window (get-buffer-window right)))
+      (select-window window)
+      (with-current-buffer right
+        (goto-char (align-buffer-line-position right (+ line 100)))
+        (set-window-point window (point)))
+      (execute-kbd-macro (kbd "C-n"))
+      (should (eq align-buffer--last-window window))
+      ;; A reading drawn afresh takes the pads out and puts them back, which
+      ;; leaves the side they are on holding no row of one.
+      (align-buffer-pad-clear left)
+      (align-buffer-pads-tests--pad left line run right line)
+      (let ((point (window-point window)))
+        (select-window (minibuffer-window))
+        (align-buffer--measure-and-level)
+        (should (equal (window-point window) point))))))
+
 (provide 'align-buffer-pads-tests)
 ;;; align-buffer-pads-tests.el ends here

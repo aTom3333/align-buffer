@@ -642,6 +642,44 @@ buffer's own rule for leaving the panes alone."
      (align-buffer--pad-top window pad))
     (align-diff-integration--quit session)))
 
+(align-diff-integration-defscenario a-measure-from-outside-keeps-the-reader-s-view
+  ;; A window that changes size, and a consumer that draws a row, both have
+  ;; the pads measured and the panes placed level afresh, and either can
+  ;; happen while the reader stands in neither pane: a package pops a hint
+  ;; window up over the frame, a timer of someone else's runs between one
+  ;; command and the next.  Led from the side the pad is on, that placement
+  ;; takes the pairs - which say nothing inside a run - and puts the reader's
+  ;; own pane back at the pair the run hangs after.
+  (let* ((session (align-diff-integration--session))
+         (buffer (align-buffer-buffer session 'right))
+         (window (get-buffer-window buffer))
+         (hint nil))
+    ;; Inside the run the new side alone has, where the rows of the pad are
+    ;; what the pane is held level with.
+    (align-diff-integration--stand session 'right
+                                   (+ align-diff-integration--at 20))
+    (align-diff-integration--keys "C-n")
+    (let ((line (align-buffer-line-at buffer (window-point window))))
+      ;; A reading drawn afresh takes the pads out and puts them back, which
+      ;; leaves the side they are on holding no row of one.  A consumer draws
+      ;; its own rows from the hook that says the reading is there and asks
+      ;; for the measure then and there, before anything has put a row back.
+      (align-diff-refresh session)
+      (setq hint (let ((ignore-window-parameters t))
+                   (split-window (frame-root-window) -2 'below)))
+      (set-window-buffer hint (get-buffer-create " *align-diff hint*"))
+      (select-window hint)
+      (align-buffer-rows-changed)
+      (align-diff-integration--settle)
+      (select-window window)
+      (let ((ignore-window-parameters t))
+        (delete-window hint))
+      (align-diff-integration--settle)
+      (align-diff-integration--expect
+       "the line the reader is on" line
+       (align-buffer-line-at buffer (window-point window))))
+    (align-diff-integration--quit session)))
+
 
 ;;; Moving hunk to hunk, over a diff with several of them
 
