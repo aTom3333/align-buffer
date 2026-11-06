@@ -205,7 +205,10 @@ is drawn: after the text of that line and above the line below it."
                      (concat "\n" (mapconcat
                                    (lambda (row) (format "a note, row %d" row))
                                    (number-sequence 1 rows)
-                                   "\n"))))
+                                   "\n")))
+        ;; The priority a consumer draws its own rows at, which is below the
+        ;; pads' and so above their rows.
+        (overlay-put overlay 'priority 5))
       (set-buffer-modified-p nil))))
 
 (defun align-buffer-integration--heighten (session side line scale)
@@ -1048,6 +1051,58 @@ question is put again behind a redisplay."
      (+ (align-buffer--pad-top facing pad)
         (align-buffer--pad-above facing pad
                                  (1+ (align-buffer-pad-text-row pad 110)))))
+    (align-buffer-quit session)))
+
+(defun align-buffer-integration--row-shows (window line rows)
+  "Return what WINDOW draws on ROWS rows from the one LINE's text is on.
+`text' for a row of the buffer's own text, `note' for one of a note hung
+there, `pad' for a row of a pad.  Read off the display itself, which is the
+only way to tell the order two strings hung at one place are drawn in."
+  (let* ((height (align-buffer--row-height window))
+         (top (+ (align-buffer--offset-in
+                  window (align-buffer-line-position (window-buffer window)
+                                                     line))
+                 (/ height 2))))
+    (mapcar (lambda (index)
+              (let* ((posn (posn-at-x-y 2 (+ top (* index height)) window))
+                     (string (and posn (car (posn-string posn)))))
+                (cond ((null string) 'text)
+                      ((string-match-p "a note" string) 'note)
+                      (t 'pad))))
+            (number-sequence 0 (1- rows)))))
+
+(align-buffer-integration-defscenario a-note-hung-where-a-pad-hangs-comes-first
+  ;; A note anchored on the line a pad hangs on is drawn in front of the same
+  ;; newline as the pad's own rows, and belongs above them: the rows stand for
+  ;; lines of the facing side that come after this one, so the note goes right
+  ;; under the line it is anchored on and the rows after it.  Which is what
+  ;; the two priorities say, and the display is what is asked here.
+  (let* ((session (align-buffer-integration--session))
+         (right (align-buffer-session-right-buffer session))
+         (facing (get-buffer-window right))
+         (pad nil))
+    ;; Two rows of a note under the line the pad hangs on, which is the last
+    ;; the right has before the forty the left alone has.  Hung before the pad
+    ;; is drawn, which is the order a re-diff leaves: the pads go and come
+    ;; back while the note stays where it is.
+    (align-buffer-integration--note-under session 'right 100 2)
+    (setq pad (align-buffer-pad-add right
+                                    (align-buffer-line-position right 101)
+                                    40 'font-lock-string-face
+                                    (align-buffer-session-left-buffer session)
+                                    101))
+    (align-buffer-integration--view session 'right 96 100)
+    (align-buffer-integration--expect
+     'a-note-hung-where-a-pad-hangs-comes-first
+     "the note under the line it is anchored on, the pad's rows after it"
+     '(text note note pad pad)
+     (align-buffer-integration--row-shows facing 100 5))
+    (align-buffer-integration--expect
+     'a-note-hung-where-a-pad-hangs-comes-first
+     "and the pad still as tall as the run it faces"
+     (align-buffer-integration--run-height
+      (get-buffer-window (align-buffer-session-left-buffer session)) 101 40)
+     (align-buffer-pad-height facing pad))
     (align-buffer-quit session)))
 
 ;;; Running

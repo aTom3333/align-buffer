@@ -57,6 +57,16 @@ with pads between them cannot read level without a lift."
 
 ;;; Making a pad
 
+(defconst align-buffer-pad-priority 20
+  "The priority a pad's rows are drawn at.
+
+The display draws the strings of one place in the order of their priority,
+the highest of them last, so rows another package hangs on the newline a pad
+hangs on are drawn above the pad's with a priority below this one and below
+them with one above it.  A pad stands for lines of the facing side that come
+after the line it hangs on, so what is hung on that line itself belongs
+above its rows.")
+
 (defun align-buffer--pad-row (face)
   "Return one blank row of a pad, faced FACE.
 A space before the newline, so the row has a glyph of its own: a row drawn
@@ -225,7 +235,7 @@ which is what lets a walk of the pad scroll the facing window alongside."
             ;; them, so it is painted like the others, and above the colour
             ;; of the line it belongs to.
             (overlay-put overlay 'face face)
-            (overlay-put overlay 'priority 5))
+            (overlay-put overlay 'priority align-buffer-pad-priority))
           (align-buffer--pad-show-cursor overlay nil face)
           overlay)))))
 
