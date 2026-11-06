@@ -266,6 +266,48 @@ them and appear not to have moved at all."
       (call-interactively #'previous-line)
       (should (equal (cdr align-buffer--walked) 1)))))
 
+(defun align-buffer-pads-tests--pull-cursor-back ()
+  "Pull point back off the end of a line, as evil does in normal state."
+  (when (and (eolp) (not (bolp)))
+    (backward-char)))
+
+(defun align-buffer-pads-tests--nothing ()
+  "A command moving neither point nor the view."
+  (interactive)
+  t)
+
+(ert-deftest align-buffer-pads-test-a-walk-lives-through-a-command-moving-nothing ()
+  "A command that moves neither point nor the view leaves the walk where it was.
+The cursor another package pulls back off the end of the line once a command
+is over says nothing about what that command did, so the walk is judged
+before it: our hook is entered at a depth that holds in front of one added
+later, which is what evil does on every entry into normal state."
+  (align-buffer-pads-tests--with-session "one\ntwo\nthree\nfour\n"
+      "one\ntwo\n"
+      '((1 . 1) (2 . 2))
+    (let ((pad (align-buffer-pad-add right
+                                     (with-current-buffer right (point-max))
+                                     2 'align-buffer-pads-tests-face left 3)))
+      (with-current-buffer right
+        ;; Added after the navigation mode and so in front of its hook, which
+        ;; is the order a state change leaves behind.
+        (add-hook 'post-command-hook #'align-buffer-pads-tests--pull-cursor-back
+                  nil t)
+        (local-set-key (kbd "C-c SPC") #'align-buffer-pads-tests--nothing))
+      (with-selected-window (get-buffer-window right)
+        (goto-char (align-buffer-line-position right 2))
+        (execute-kbd-macro (kbd "C-n"))
+        (should (equal align-buffer--walked (cons pad 0)))
+        ;; A press that moves nothing, which is what a command stopping at the
+        ;; end of what it moves between does.
+        (execute-kbd-macro (kbd "C-c SPC"))
+        (should (equal align-buffer--walked (cons pad 0)))
+        (should (= (point) (align-buffer-pad-hangs pad)))
+        ;; And through the one after it, which is the press that acts on the
+        ;; stop rather than a step back into the rows.
+        (execute-kbd-macro (kbd "C-c SPC"))
+        (should (equal align-buffer--walked (cons pad 0)))))))
+
 (ert-deftest align-buffer-pads-test-moving-point-ends-the-walk ()
   "A command that moves point gives the cursor back to the text."
   (align-buffer-pads-tests--with-session "one\ntwo\n"

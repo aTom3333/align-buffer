@@ -578,10 +578,16 @@ input is such an event."
   :group 'align-buffer
   (if align-buffer-navigation-mode
       (progn
-        ;; Before align-buffer's own hook: the walk decides which of the two
-        ;; panes are ours, and the sync has to read that decision rather than
-        ;; place them first and be corrected.
-        (add-hook 'post-command-hook #'align-buffer--walk-check nil t)
+        ;; First of all, by depth rather than by being added first: before
+        ;; align-buffer's own hook, since the walk decides which of the two
+        ;; panes are ours and the sync has to read that decision rather than
+        ;; place them first and be corrected; and before any package that
+        ;; adjusts the cursor once a command is over, since the point such a
+        ;; package leaves says nothing about what the command did.  A depth
+        ;; holds against a hook added later, where being added first does
+        ;; not: evil puts its own back at the front of the hook every time
+        ;; normal state is entered.
+        (add-hook 'post-command-hook #'align-buffer--walk-check -100 t)
         ;; Last of all, so that point is where the row being read is drawn
         ;; whatever else in the hook has moved it.
         (add-hook 'post-command-hook #'align-buffer--walk-hold-point 100 t)
