@@ -912,6 +912,21 @@ brings it back."
                  ;; for, which is a line off the pair by as many rows as the
                  ;; reader has walked.
                  ((align-buffer-fuzz--reading-rows-p leader follower) nil)
+                 ;; Nothing is promised where the follower is held at the
+                 ;; beginning of its buffer and draws none of the pair's own
+                 ;; line: what hangs above a first line can be taller than the
+                 ;; window, which then holds nothing but those rows, and there
+                 ;; is no view further back for it to take instead.  Point
+                 ;; cannot go on a line that is drawn nowhere - redisplay
+                 ;; brings it back to the one position the window does show.
+                 ((and (= (window-start follower)
+                          (with-current-buffer (window-buffer follower)
+                            (point-min)))
+                       (not (pos-visible-in-window-p
+                             (align-buffer-line-position
+                              (window-buffer follower) (cdr anchor))
+                             follower)))
+                  nil)
                  ;; Nothing is promised where the band asks for a row the
                  ;; buffer runs out before: point can be put on a line and
                  ;; the follower has none below its last, so the nearest it
