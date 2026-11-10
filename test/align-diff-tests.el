@@ -574,6 +574,24 @@ after that, and a reading drawn afresh runs it again."
       (align-diff-refresh session)
       (should (equal applied '(t t))))))
 
+(ert-deftest align-diff-test-the-pad-facing-a-new-file-is-found ()
+  "Every line of a file the other side has nothing of is faced by the one pad
+standing for it, which hangs at the beginning of the empty pane."
+  (let ((align-diff-gap-marker 'pad))
+    (align-diff-tests--with-session "" "one\ntwo\nthree\n"
+      (should (align-buffer-facing-pad session 'right 1))
+      (should (align-buffer-facing-pad session 'right 3))
+      (should-not (align-buffer-facing-pad session 'left 1)))))
+
+(ert-deftest align-diff-test-the-pad-facing-a-run-opening-a-file-is-found ()
+  "Lines added above the first line both sides share are faced by their pad."
+  (let ((align-diff-gap-marker 'pad))
+    (align-diff-tests--with-session "two\n" "a\nb\ntwo\n"
+      (should (align-buffer-facing-pad session 'right 1))
+      (should (align-buffer-facing-pad session 'right 2))
+      ;; The line both sides have is faced by a line.
+      (should-not (align-buffer-facing-pad session 'right 3)))))
+
 
 ;;; Colouring the characters
 

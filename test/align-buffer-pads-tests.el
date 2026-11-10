@@ -772,6 +772,31 @@ with the row facing its own text."
       (should-not (align-buffer-facing-pad session 'right 1))
       (should-not (align-buffer-facing-pad session 'left 2)))))
 
+(ert-deftest align-buffer-pads-test-the-pad-facing-a-run-above-every-pair-is-found ()
+  "A run with no pair above it is faced by the pad on the facing side's first
+line, with a row for each of its lines as anywhere else."
+  (align-buffer-pads-tests--with-session "two\n"
+      "new a\nnew b\nnew c\ntwo\n"
+      '((1 . 4))
+    (let ((pad (align-buffer-pads-tests--pad left 1 3 right 1)))
+      (should (equal (align-buffer-facing-pad session 'right 1) (cons pad 0)))
+      (should (equal (align-buffer-facing-pad session 'right 3) (cons pad 2)))
+      ;; The pair below the run is faced by a line.
+      (should-not (align-buffer-facing-pad session 'right 4))
+      (should-not (align-buffer-facing-pad session 'left 1)))))
+
+(ert-deftest align-buffer-pads-test-the-pad-facing-a-side-with-no-pairs-is-found ()
+  "A side the other has nothing of is faced throughout by the one pad over
+there, there being no pair anywhere to find it from."
+  (align-buffer-pads-tests--with-session ""
+      "new a\nnew b\nnew c\n"
+      nil
+    (let ((pad (align-buffer-pads-tests--pad left 1 3 right 1)))
+      (should (equal (align-buffer-facing-pad session 'right 1) (cons pad 0)))
+      (should (equal (align-buffer-facing-pad session 'right 2) (cons pad 1)))
+      (should (equal (align-buffer-facing-pad session 'right 3) (cons pad 2)))
+      (should-not (align-buffer-facing-pad session 'left 1)))))
+
 ;;; Measuring a long run
 
 (defun align-buffer-pads-tests--numbered (name from to)

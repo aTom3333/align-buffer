@@ -939,16 +939,24 @@ the correspondence whole: a run of lines one side alone has is drawn over
 there as the rows of a pad, a row for every screen row the run is drawn as,
 so a reader on the real lines has a row to be level with all the way down the
 run.  The pad hangs on the line after the run's own pair, which is how it is
-found.
+found, and on the first line of the facing side for a run with no pair above
+it at all - a run at the top of the buffer, or a side the other one has
+nothing of.
 
 Given WINDOW, the row is the one standing for the screen row the reader is on
 rather than for the beginning of their line: a line of theirs that wraps is
 read a row at a time and each of those rows has a row of the pad of its own."
-  (let ((anchor (align-buffer-anchor session side line)))
-    (when (and anchor (> line (car anchor)))
+  (let* ((anchor (align-buffer-anchor session side line))
+         ;; The line of the facing side the run's rows stand in front of.  A
+         ;; pair at or above LINE puts them in front of the line after its
+         ;; own; with none there the run opens the buffer and they stand in
+         ;; front of its first line.
+         (opening (or (null anchor) (> (car anchor) line))))
+    (when (or opening (> line (car anchor)))
       (let* ((facing (align-buffer-buffer session
                                           (align-buffer-other-side side)))
-             (position (align-buffer-line-position facing (1+ (cdr anchor))))
+             (position (align-buffer-line-position
+                        facing (if opening 1 (1+ (cdr anchor)))))
              (pad (and position (align-buffer-pad-at position facing)))
              ;; The row facing LINE's own text, and on from there by the
              ;; rows of their own line the reader has already walked.
